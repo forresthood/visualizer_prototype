@@ -1,12 +1,12 @@
 import sys
 import numpy as np
 from collections import deque
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QSlider, QLabel, QComboBox, 
-                             QPushButton, QSpinBox, QGroupBox, QStackedWidget)
-from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
+                             QHBoxLayout, QLabel, QComboBox,
+                             QSpinBox, QGroupBox, QStackedWidget)
+from PyQt6.QtCore import Qt, QTimer, QRectF
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QLinearGradient,
-                          QImage, QPainterPath)
+                          QPainterPath)
 
 # ─────────────────────────────────────────────
 #  Base mixin for shared color/rainbow logic
