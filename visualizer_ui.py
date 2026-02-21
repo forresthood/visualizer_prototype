@@ -3,10 +3,32 @@ import numpy as np
 from collections import deque
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QComboBox,
-                             QSpinBox, QGroupBox, QStackedWidget)
-from PyQt6.QtCore import Qt, QTimer, QRectF
+                             QSpinBox, QGroupBox, QStackedWidget, QPushButton)
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QLinearGradient,
-                          QPainterPath)
+                          QPainterPath, QRadialGradient, QMouseEvent, QFont, QImage)
+
+# ─────────────────────────────────────────────
+#  Theme Constants
+# ─────────────────────────────────────────────
+class Theme:
+    VIZ_BG = QColor(13, 13, 22)
+    BG_GLASS = QColor(255, 255, 255, 10)
+    BG_GLASS_BORDER = QColor(255, 255, 255, 20)
+    RADIUS_LG = 12
+    RADIUS_SM = 6
+    FONT_SIZE_TITLE = 16
+    FONT_SIZE_SMALL = 10
+    SEG_ACTIVE_BG = QColor(255, 255, 255, 20)
+    SEG_BORDER = QColor(255, 255, 255, 40)
+    TEXT_PRIMARY = QColor(240, 240, 245)
+    TEXT_SECONDARY = QColor(180, 180, 190)
+
+    @staticmethod
+    def font(size, weight=QFont.Weight.Normal):
+        f = QFont("Segoe UI", size)
+        f.setWeight(weight)
+        return f
 
 # ─────────────────────────────────────────────
 #  Base mixin for shared color / rainbow logic
@@ -233,10 +255,22 @@ class SpectrogramWidget(ColorMixin, QWidget):
         self.init_color()
         self.history_length = history_length
         self.fft_history = deque(maxlen=history_length)
+        self._viridis_lut = None
 
     def update_fft(self, fft_data):
         self.fft_history.append(fft_data)
         self.update()
+
+    def _build_viridis_lut(self):
+        lut = []
+        for i in range(256):
+            t = i / 255.0
+            if t < 0.01:
+                lut.append(0) # Transparent
+            else:
+                c = self._viridis_color(t)
+                lut.append(c.rgba())
+        return lut
 
     def _viridis_color(self, t):
         """Attempt a perceptually-uniform viridis-style colormap."""
@@ -259,33 +293,68 @@ class SpectrogramWidget(ColorMixin, QWidget):
         painter = QPainter(self)
         painter.fillRect(self.rect(), self.bg_color)
 
-        w, h = self.width(), self.height()
-        num_cols = len(self.fft_history)
-        if num_cols == 0:
+        if not self.fft_history:
             return
 
-        col_width = max(1.0, w / self.history_length)
+        try:
+            # Convert history to numpy array (history, bins)
+            data = np.array(self.fft_history)
+            if data.ndim != 2:
+                return
+        except Exception:
+            return
 
-        for col_idx, fft_slice in enumerate(self.fft_history):
-            x = int(col_idx * col_width)
-            num_bins = len(fft_slice)
-            if num_bins == 0:
-                continue
-            bin_height = max(1.0, h / num_bins)
+        h_len, n_bins = data.shape
+        if h_len == 0 or n_bins == 0:
+            return
 
-            for bin_idx in range(num_bins):
-                intensity = max(0.0, min(1.0, fft_slice[bin_idx]))
-                if intensity < 0.01:
-                    continue
-                y = int(h - (bin_idx + 1) * bin_height)
+        if self.rainbow_mode:
+            self._paint_rainbow(painter, data, h_len, n_bins)
+        else:
+            self._paint_viridis(painter, data, h_len, n_bins)
 
-                if self.rainbow_mode:
-                    hue = (self.rainbow_hue + bin_idx / num_bins) % 1.0
-                    color = QColor.fromHsvF(hue, 0.8, intensity)
-                else:
-                    color = self._viridis_color(intensity)
+    def _paint_viridis(self, painter, data, w, h):
+        if self._viridis_lut is None:
+            self._viridis_lut = self._build_viridis_lut()
 
-                painter.fillRect(QRectF(x, y, col_width + 1, bin_height + 1), color)
+        # Transpose to (bins, history) so row=bin
+        # Flip vertically so bin 0 is at bottom
+        img_data = np.flipud(data.T)
+
+        # Scale to 0-255
+        img_data = (np.clip(img_data, 0, 1) * 255).astype(np.uint8)
+
+        if not img_data.flags['C_CONTIGUOUS']:
+            img_data = np.ascontiguousarray(img_data)
+
+        image = QImage(img_data.data, w, h, w, QImage.Format.Format_Indexed8)
+        image.setColorTable(self._viridis_lut)
+
+        painter.drawImage(self.rect(), image)
+
+    def _paint_rainbow(self, painter, data, w, h):
+        img_data_source = np.flipud(data.T)
+        buffer = np.zeros((h, w, 4), dtype=np.uint8)
+
+        for r_idx in range(h):
+            bin_idx = h - 1 - r_idx
+            hue = (self.rainbow_hue + bin_idx / h) % 1.0
+
+            c = QColor.fromHsvF(hue, 0.8, 1.0)
+            red, green, blue = c.red(), c.green(), c.blue()
+
+            row = img_data_source[r_idx]
+            mask = row >= 0.01
+            vals = row[mask]
+
+            # BB GG RR AA (Little Endian for 0xAARRGGBB)
+            buffer[r_idx, mask, 0] = (blue * vals).astype(np.uint8)
+            buffer[r_idx, mask, 1] = (green * vals).astype(np.uint8)
+            buffer[r_idx, mask, 2] = (red * vals).astype(np.uint8)
+            buffer[r_idx, mask, 3] = 255
+
+        image = QImage(buffer.data, w, h, w * 4, QImage.Format.Format_ARGB32)
+        painter.drawImage(self.rect(), image)
 
 
 # ─────────────────────────────────────────────
