@@ -248,8 +248,11 @@ class MainWindow(QMainWindow):
 
         # Mode selector
         mode_layout = QHBoxLayout()
-        mode_layout.addWidget(QLabel("Mode:"))
+        mode_label = QLabel("&Mode:")
+        mode_layout.addWidget(mode_label)
         self.mode_combo = QComboBox()
+        self.mode_combo.setToolTip("Select the visualization type (Alt+M)")
+        mode_label.setBuddy(self.mode_combo)
         self.mode_combo.addItems(["Bars", "Waveform", "Spectrogram"])
         self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
         mode_layout.addWidget(self.mode_combo)
@@ -259,8 +262,11 @@ class MainWindow(QMainWindow):
         self.bar_count_layout_widget = QWidget()
         bar_count_layout = QHBoxLayout(self.bar_count_layout_widget)
         bar_count_layout.setContentsMargins(0, 0, 0, 0)
-        bar_count_layout.addWidget(QLabel("Bars:"))
+        bar_label = QLabel("&Bars:")
+        bar_count_layout.addWidget(bar_label)
         self.bar_spinbox = QSpinBox()
+        self.bar_spinbox.setToolTip("Adjust the number of frequency bars (Alt+B)")
+        bar_label.setBuddy(self.bar_spinbox)
         self.bar_spinbox.setRange(8, 256)
         self.bar_spinbox.setValue(32)
         self.bar_spinbox.setSingleStep(8)
@@ -270,8 +276,11 @@ class MainWindow(QMainWindow):
 
         # Color Combo Box
         color_layout = QHBoxLayout()
-        color_layout.addWidget(QLabel("Color:"))
+        color_label = QLabel("&Color:")
+        color_layout.addWidget(color_label)
         self.color_combo = QComboBox()
+        self.color_combo.setToolTip("Choose the color theme (Alt+C)")
+        color_label.setBuddy(self.color_combo)
 
         self.color_map = {
             "Rainbow": None,
