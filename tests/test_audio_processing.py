@@ -119,5 +119,70 @@ class TestAudioProcessor(unittest.TestCase):
 
          np.testing.assert_array_almost_equal(bars_short, bars_padded)
 
+    def test_compute_fft_edge_cases(self):
+        """Test edge cases for compute_fft: None, empty, short, long inputs."""
+        num_bars = 32
+
+        # 1. None input
+        bars = self.processor.compute_fft(None, num_bars)
+        self.assertEqual(len(bars), num_bars)
+        self.assertTrue(np.all(bars == 0))
+
+        # 2. Empty input
+        bars = self.processor.compute_fft([], num_bars)
+        self.assertEqual(len(bars), num_bars)
+        self.assertTrue(np.all(bars == 0))
+
+        bars = self.processor.compute_fft(np.array([]), num_bars)
+        self.assertEqual(len(bars), num_bars)
+        self.assertTrue(np.all(bars == 0))
+
+        # 3. Short input (less than buffer_frames)
+        short_data = np.ones(self.buffer_frames // 2)
+        bars = self.processor.compute_fft(short_data, num_bars)
+        self.assertEqual(len(bars), num_bars)
+        # Should return valid normalized values
+        self.assertTrue(np.all(bars >= 0.0))
+        self.assertTrue(np.all(bars <= 1.0))
+
+        # 4. Long input (more than buffer_frames)
+        long_data = np.ones(self.buffer_frames * 2)
+        bars = self.processor.compute_fft(long_data, num_bars)
+        self.assertEqual(len(bars), num_bars)
+        self.assertTrue(np.all(bars >= 0.0))
+        self.assertTrue(np.all(bars <= 1.0))
+
+    def test_get_raw_fft_edge_cases(self):
+        """Test edge cases for get_raw_fft: None, empty, short, long inputs."""
+        expected_len = self.buffer_frames // 2 + 1
+
+        # 1. None input
+        fft_data = self.processor.get_raw_fft(None)
+        self.assertEqual(len(fft_data), expected_len)
+        self.assertTrue(np.all(fft_data == 0))
+
+        # 2. Empty input
+        fft_data = self.processor.get_raw_fft([])
+        self.assertEqual(len(fft_data), expected_len)
+        self.assertTrue(np.all(fft_data == 0))
+
+        fft_data = self.processor.get_raw_fft(np.array([]))
+        self.assertEqual(len(fft_data), expected_len)
+        self.assertTrue(np.all(fft_data == 0))
+
+        # 3. Short input
+        short_data = np.ones(self.buffer_frames // 2)
+        fft_data = self.processor.get_raw_fft(short_data)
+        self.assertEqual(len(fft_data), expected_len)
+        self.assertTrue(np.all(fft_data >= 0.0))
+        self.assertTrue(np.all(fft_data <= 1.0))
+
+        # 4. Long input
+        long_data = np.ones(self.buffer_frames * 2)
+        fft_data = self.processor.get_raw_fft(long_data)
+        self.assertEqual(len(fft_data), expected_len)
+        self.assertTrue(np.all(fft_data >= 0.0))
+        self.assertTrue(np.all(fft_data <= 1.0))
+
 if __name__ == '__main__':
     unittest.main()

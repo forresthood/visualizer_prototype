@@ -24,20 +24,11 @@ class AudioProcessor:
         self.min_freq = 20
         self.max_freq = 20000
 
-    def compute_fft(self, audio_data, num_bars):
+    def _calculate_fft_magnitude(self, audio_data):
         """
-        Computes the FFT of the audio data and bins it into `num_bars`.
-
-        Args:
-            audio_data: The input audio data array.
-            num_bars: The number of frequency bars to produce.
-
-        Returns:
-            A numpy array of length `num_bars` with normalized values between 0.0 and 1.0.
+        Helper method to compute FFT magnitude in dB.
+        Handles padding/truncation and windowing.
         """
-        if audio_data is None or len(audio_data) == 0:
-            return np.zeros(num_bars)
-
         # Ensure audio data matches buffer size (pad if necessary)
         if len(audio_data) < self.buffer_frames:
             padded_data = np.zeros(self.buffer_frames)
@@ -55,6 +46,24 @@ class AudioProcessor:
         # Calculate magnitudes and normalize
         fft_mag = np.abs(fft_complex)
         fft_mag = DB_CONVERSION_COEFFICIENT * np.log10(fft_mag + LOG_EPSILON) # Convert to dB scale
+
+        return fft_mag
+
+    def compute_fft(self, audio_data, num_bars):
+        """
+        Computes the FFT of the audio data and bins it into `num_bars`.
+
+        Args:
+            audio_data: The input audio data array.
+            num_bars: The number of frequency bars to produce.
+
+        Returns:
+            A numpy array of length `num_bars` with normalized values between 0.0 and 1.0.
+        """
+        if audio_data is None or len(audio_data) == 0:
+            return np.zeros(num_bars)
+
+        fft_mag = self._calculate_fft_magnitude(audio_data)
 
         # Get frequencies corresponding to FFT bins
         freqs = np.fft.rfftfreq(self.buffer_frames, 1.0 / self.sample_rate)
@@ -101,18 +110,7 @@ class AudioProcessor:
         if audio_data is None or len(audio_data) == 0:
             return np.zeros(self.buffer_frames // 2 + 1)
 
-        # Ensure audio data matches buffer size
-        if len(audio_data) < self.buffer_frames:
-            padded_data = np.zeros(self.buffer_frames)
-            padded_data[:len(audio_data)] = audio_data
-            audio_data = padded_data
-        elif len(audio_data) > self.buffer_frames:
-            audio_data = audio_data[-self.buffer_frames:]
-
-        windowed_data = audio_data * self.window
-        fft_complex = np.fft.rfft(windowed_data)
-        fft_mag = np.abs(fft_complex)
-        fft_mag = DB_CONVERSION_COEFFICIENT * np.log10(fft_mag + LOG_EPSILON)
+        fft_mag = self._calculate_fft_magnitude(audio_data)
 
         # Normalize to 0-1
         normalized = (fft_mag + NORMALIZATION_OFFSET) / NORMALIZATION_SCALE
