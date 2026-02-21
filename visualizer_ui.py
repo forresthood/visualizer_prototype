@@ -1,63 +1,12 @@
 import sys
 import numpy as np
 from collections import deque
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QSlider, QLabel, QPushButton,
-                             QSpinBox, QStackedWidget, QGraphicsDropShadowEffect,
-                             QSizePolicy)
-from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QPropertyAnimation, QEasingCurve
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
+                             QHBoxLayout, QLabel, QComboBox,
+                             QSpinBox, QGroupBox, QStackedWidget)
+from PyQt6.QtCore import Qt, QTimer, QRectF
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QLinearGradient,
-                          QRadialGradient, QImage, QPainterPath, QFont,
-                          QFontDatabase, QIcon, QPalette, QMouseEvent)
-
-
-# ─────────────────────────────────────────────
-#  Design Tokens
-# ─────────────────────────────────────────────
-class Theme:
-    # Backgrounds
-    BG_PRIMARY = QColor(10, 10, 18)
-    BG_SURFACE = QColor(18, 18, 30)
-    BG_GLASS = QColor(255, 255, 255, 12)
-    BG_GLASS_BORDER = QColor(255, 255, 255, 25)
-    BG_HOVER = QColor(255, 255, 255, 18)
-
-    # Text
-    TEXT_PRIMARY = QColor(240, 240, 245)
-    TEXT_SECONDARY = QColor(160, 160, 175)
-    TEXT_DIM = QColor(100, 100, 115)
-
-    # Accents
-    ACCENT = QColor(88, 130, 255)
-    ACCENT_GLOW = QColor(88, 130, 255, 60)
-
-    # Visualization BG
-    VIZ_BG = QColor(8, 8, 14)
-
-    # Segment control
-    SEG_ACTIVE_BG = QColor(255, 255, 255, 22)
-    SEG_INACTIVE_BG = QColor(0, 0, 0, 0)
-    SEG_CONTAINER_BG = QColor(255, 255, 255, 8)
-    SEG_BORDER = QColor(255, 255, 255, 15)
-
-    # Radii
-    RADIUS_LG = 14
-    RADIUS_MD = 10
-    RADIUS_SM = 6
-
-    # Fonts
-    FONT_FAMILY = "Segoe UI"
-    FONT_SIZE_TITLE = 13
-    FONT_SIZE_LABEL = 11
-    FONT_SIZE_SMALL = 10
-
-    @staticmethod
-    def font(size=11, weight=QFont.Weight.Normal):
-        f = QFont(Theme.FONT_FAMILY, size)
-        f.setWeight(weight)
-        f.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
-        return f
-
+                          QPainterPath)
 
 # ─────────────────────────────────────────────
 #  Base mixin for shared color / rainbow logic
@@ -609,105 +558,51 @@ class MainWindow(QMainWindow):
 
         # Visualization stack
         self.stack = QStackedWidget()
-        self.stack.setStyleSheet("background: transparent; border-radius: 10px;")
-        self.stack.addWidget(self.bar_widget)         # index 0
-        self.stack.addWidget(self.waveform_widget)     # index 1
-        self.stack.addWidget(self.spectrogram_widget)  # index 2
-        content_layout.addWidget(self.stack, stretch=1)
+        self.stack.addWidget(self.bar_widget)        # index 0
+        self.stack.addWidget(self.waveform_widget)    # index 1
+        self.stack.addWidget(self.spectrogram_widget) # index 2
+        main_layout.addWidget(self.stack, stretch=1)
 
-        # ── Controls panel (glass) ──
-        glass = GlassPanel()
-        glass.setFixedHeight(72)
-        glass_layout = QHBoxLayout(glass)
-        glass_layout.setContentsMargins(16, 10, 16, 10)
-        glass_layout.setSpacing(20)
+        # Controls Group
+        controls_group = QGroupBox("Settings")
+        controls_layout = QHBoxLayout(controls_group)
 
-        # Segmented mode control
-        mode_container = QWidget()
-        mode_container.setStyleSheet(f"""
-            background: rgba(255,255,255,0.05);
-            border-radius: {Theme.RADIUS_MD}px;
-            border: 1px solid rgba(255,255,255,0.08);
-        """)
-        mode_layout = QHBoxLayout(mode_container)
-        mode_layout.setContentsMargins(3, 3, 3, 3)
-        mode_layout.setSpacing(2)
+        # Mode selector
+        mode_layout = QHBoxLayout()
+        mode_label = QLabel("&Mode:")
+        mode_layout.addWidget(mode_label)
+        self.mode_combo = QComboBox()
+        self.mode_combo.setToolTip("Select the visualization type (Alt+M)")
+        mode_label.setBuddy(self.mode_combo)
+        self.mode_combo.addItems(["Bars", "Waveform", "Spectrogram"])
+        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        mode_layout.addWidget(self.mode_combo)
+        controls_layout.addLayout(mode_layout)
 
-        self.mode_buttons = []
-        for label in ["Bars", "Wave", "Spectrum"]:
-            btn = SegmentButton(label)
-            btn.clicked.connect(lambda checked, l=label: self._on_segment_clicked(l))
-            mode_layout.addWidget(btn)
-            self.mode_buttons.append(btn)
-        self.mode_buttons[0].setChecked(True)
-        glass_layout.addWidget(mode_container)
-
-        # Separator
-        sep1 = QWidget()
-        sep1.setFixedSize(1, 32)
-        sep1.setStyleSheet("background: rgba(255,255,255,0.1);")
-        glass_layout.addWidget(sep1)
-
-        # Bar count control (slider + label)
-        self.bar_count_container = QWidget()
-        bar_count_layout = QHBoxLayout(self.bar_count_container)
+        # Bar Count Control
+        self.bar_count_layout_widget = QWidget()
+        bar_count_layout = QHBoxLayout(self.bar_count_layout_widget)
         bar_count_layout.setContentsMargins(0, 0, 0, 0)
-        bar_count_layout.setSpacing(8)
+        bar_label = QLabel("&Bars:")
+        bar_count_layout.addWidget(bar_label)
+        self.bar_spinbox = QSpinBox()
+        self.bar_spinbox.setToolTip("Adjust the number of frequency bars (Alt+B)")
+        bar_label.setBuddy(self.bar_spinbox)
+        self.bar_spinbox.setRange(8, 256)
+        self.bar_spinbox.setValue(32)
+        self.bar_spinbox.setSingleStep(8)
+        self.bar_spinbox.valueChanged.connect(self._on_bars_changed)
+        bar_count_layout.addWidget(self.bar_spinbox)
+        controls_layout.addWidget(self.bar_count_layout_widget)
 
-        bars_label = QLabel("Bars")
-        bars_label.setFont(Theme.font(Theme.FONT_SIZE_SMALL))
-        bars_label.setStyleSheet("color: rgba(160,160,175,0.9); background: transparent;")
-        bar_count_layout.addWidget(bars_label)
+        # Color Combo Box
+        color_layout = QHBoxLayout()
+        color_label = QLabel("&Color:")
+        color_layout.addWidget(color_label)
+        self.color_combo = QComboBox()
+        self.color_combo.setToolTip("Choose the color theme (Alt+C)")
+        color_label.setBuddy(self.color_combo)
 
-        self.bar_slider = QSlider(Qt.Orientation.Horizontal)
-        self.bar_slider.setRange(8, 128)
-        self.bar_slider.setValue(32)
-        self.bar_slider.setSingleStep(8)
-        self.bar_slider.setPageStep(16)
-        self.bar_slider.setFixedWidth(100)
-        self.bar_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                background: rgba(255,255,255,0.08);
-                height: 4px;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #7a9aff, stop:1 #5882ff);
-                width: 14px;
-                height: 14px;
-                margin: -5px 0;
-                border-radius: 7px;
-                border: 1px solid rgba(255,255,255,0.15);
-            }
-            QSlider::handle:horizontal:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #8eabff, stop:1 #6d95ff);
-            }
-            QSlider::sub-page:horizontal {
-                background: rgba(88,130,255,0.35);
-                border-radius: 2px;
-            }
-        """)
-        self.bar_slider.valueChanged.connect(self._on_bars_changed)
-        bar_count_layout.addWidget(self.bar_slider)
-
-        self.bar_count_label = QLabel("32")
-        self.bar_count_label.setFont(Theme.font(Theme.FONT_SIZE_SMALL, QFont.Weight.Medium))
-        self.bar_count_label.setFixedWidth(28)
-        self.bar_count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.bar_count_label.setStyleSheet("color: rgba(240,240,245,0.85); background: transparent;")
-        bar_count_layout.addWidget(self.bar_count_label)
-
-        glass_layout.addWidget(self.bar_count_container)
-
-        # Separator
-        sep2 = QWidget()
-        sep2.setFixedSize(1, 32)
-        sep2.setStyleSheet("background: rgba(255,255,255,0.1);")
-        glass_layout.addWidget(sep2)
-
-        # Color swatches
         self.color_map = {
             "Rainbow": None,
             "Cyan":    QColor(0, 200, 255),
