@@ -3,10 +3,33 @@ import numpy as np
 from collections import deque
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QComboBox,
-                             QSpinBox, QGroupBox, QStackedWidget)
-from PyQt6.QtCore import Qt, QTimer, QRectF
+                             QSpinBox, QGroupBox, QStackedWidget, QPushButton)
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QLinearGradient,
-                          QPainterPath)
+                          QPainterPath, QRadialGradient, QMouseEvent, QFont)
+
+class Theme:
+    VIZ_BG = QColor(13, 13, 22)
+    BG_GLASS = QColor(30, 30, 40, 180)
+    BG_GLASS_BORDER = QColor(255, 255, 255, 20)
+
+    TEXT_PRIMARY = QColor(240, 240, 245)
+    TEXT_SECONDARY = QColor(160, 160, 170)
+
+    SEG_ACTIVE_BG = QColor(255, 255, 255, 20)
+    SEG_BORDER = QColor(255, 255, 255, 30)
+
+    RADIUS_LG = 14
+    RADIUS_SM = 6
+
+    FONT_SIZE_TITLE = 14
+    FONT_SIZE_SMALL = 11
+
+    @staticmethod
+    def font(size, weight=QFont.Weight.Normal):
+        f = QFont("Segoe UI", size)
+        f.setWeight(weight)
+        return f
 
 # ─────────────────────────────────────────────
 #  Base mixin for shared color / rainbow logic
@@ -49,6 +72,14 @@ class BarVisualizerWidget(ColorMixin, QWidget):
         self.init_color()
         self.bars = 32
         self.bar_values = np.zeros(self.bars)
+        self._init_rainbow_palette()
+
+    def _init_rainbow_palette(self):
+        self._rainbow_palette = []
+        for i in range(1024):
+            hue = i / 1024.0
+            color = QColor.fromHsvF(hue, 0.75, 1.0)
+            self._rainbow_palette.append((color, color.darker(160), color.lighter(130)))
 
     def set_bars(self, count):
         self.bars = count
@@ -79,6 +110,12 @@ class BarVisualizerWidget(ColorMixin, QWidget):
         if bar_width <= 0:
             return
 
+        # Pre-calculate non-rainbow colors if needed
+        if not self.rainbow_mode:
+            static_color = self.bar_color
+            static_dark = static_color.darker(160)
+            static_light = static_color.lighter(130)
+
         for i in range(self.bars):
             val = max(0.0, min(1.0, self.bar_values[i]))
             bar_height = val * draw_h
@@ -88,9 +125,14 @@ class BarVisualizerWidget(ColorMixin, QWidget):
 
             # Determine color
             if self.rainbow_mode:
-                current_color = QColor.fromHsvF((self.rainbow_hue + i / self.bars) % 1.0, 0.75, 1.0)
+                hue_idx = int(((self.rainbow_hue + i / self.bars) % 1.0) * 1024)
+                # Clamp to palette size
+                hue_idx = hue_idx % 1024
+                current_color, dark_color, light_color = self._rainbow_palette[hue_idx]
             else:
-                current_color = self.bar_color
+                current_color = static_color
+                dark_color = static_dark
+                light_color = static_light
 
             # Glow pass — larger, semi-transparent behind the bar
             if val > 0.05:
@@ -104,9 +146,9 @@ class BarVisualizerWidget(ColorMixin, QWidget):
             # Main bar gradient (bottom dark → top light)
             gradient = QLinearGradient(0, 1, 0, 0)
             gradient.setCoordinateMode(QLinearGradient.CoordinateMode.ObjectBoundingMode)
-            gradient.setColorAt(0, current_color.darker(160))
+            gradient.setColorAt(0, dark_color)
             gradient.setColorAt(0.5, current_color)
-            gradient.setColorAt(1, current_color.lighter(130))
+            gradient.setColorAt(1, light_color)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(gradient))
             painter.drawRoundedRect(rect, 4, 4)
