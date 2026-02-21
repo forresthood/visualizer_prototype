@@ -66,6 +66,59 @@ class TestAudioProcessor(unittest.TestCase):
         fft_data = self.processor.get_raw_fft(audio_data)
         self.assertGreater(fft_data[0], 0)
 
+    def test_compute_fft_none_input(self):
+        """Test compute_fft with None input."""
+        bars = self.processor.compute_fft(None, 32)
+        self.assertEqual(len(bars), 32)
+        self.assertTrue(np.all(bars == 0.0))
+
+    def test_compute_fft_empty_input(self):
+        """Test compute_fft with empty input."""
+        bars = self.processor.compute_fft([], 32)
+        self.assertEqual(len(bars), 32)
+        self.assertTrue(np.all(bars == 0.0))
+
+    def test_compute_fft_short_input(self):
+        """Test compute_fft with input shorter than buffer size."""
+        # Create a short input with an impulse in the middle
+        short_len = self.buffer_frames // 2
+        audio_data = np.zeros(short_len)
+        audio_data[short_len // 2] = 1.0  # Impulse
+
+        bars = self.processor.compute_fft(audio_data, 32)
+        self.assertEqual(len(bars), 32)
+        # Should produce non-zero output
+        self.assertTrue(np.any(bars > 0.0))
+
+    def test_compute_fft_long_input(self):
+        """Test compute_fft with input longer than buffer size."""
+        long_len = self.buffer_frames * 2
+        audio_data = np.zeros(long_len)
+        # Add impulse in the second half (which corresponds to the processed buffer)
+        # Because implementation takes the LAST buffer_frames: audio_data[-self.buffer_frames:]
+        audio_data[long_len - self.buffer_frames // 2] = 1.0
+
+        bars = self.processor.compute_fft(audio_data, 32)
+        self.assertEqual(len(bars), 32)
+        self.assertTrue(np.any(bars > 0.0))
+
+    def test_compute_fft_padding_correctness(self):
+         """Test that short input is correctly padded."""
+         # Create a short input
+         short_len = self.buffer_frames // 2
+         audio_data = np.zeros(short_len)
+         audio_data[short_len // 2] = 1.0
+
+         # Compute FFT on short data
+         bars_short = self.processor.compute_fft(audio_data, 32)
+
+         # Manually pad and compute
+         padded_data = np.zeros(self.buffer_frames)
+         padded_data[:short_len] = audio_data
+         bars_padded = self.processor.compute_fft(padded_data, 32)
+
+         np.testing.assert_array_almost_equal(bars_short, bars_padded)
+
     def test_compute_fft_edge_cases(self):
         """Test edge cases for compute_fft: None, empty, short, long inputs."""
         num_bars = 32
