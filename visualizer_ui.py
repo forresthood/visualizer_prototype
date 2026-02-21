@@ -73,6 +73,16 @@ class BarVisualizerWidget(ColorMixin, QWidget):
         if bar_width <= 0:
             return
 
+        # Optimization: Reuse gradient for non-rainbow mode
+        if not self.rainbow_mode:
+            gradient = QLinearGradient(0, 1, 0, 0)
+            gradient.setCoordinateMode(QLinearGradient.CoordinateMode.ObjectBoundingMode)
+            gradient.setColorAt(0, self.bar_color.darker(150))
+            gradient.setColorAt(1, self.bar_color.lighter(120))
+            brush = QBrush(gradient)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(brush)
+
         for i in range(self.bars):
             val = max(0.0, min(1.0, self.bar_values[i]))
             bar_height = val * (h - 20)
@@ -82,14 +92,13 @@ class BarVisualizerWidget(ColorMixin, QWidget):
 
             if self.rainbow_mode:
                 current_color = QColor.fromHsvF((self.rainbow_hue + i / self.bars) % 1.0, 0.8, 1.0)
-            else:
-                current_color = self.bar_color
+                gradient = QLinearGradient(0, 1, 0, 0)
+                gradient.setCoordinateMode(QLinearGradient.CoordinateMode.ObjectBoundingMode)
+                gradient.setColorAt(0, current_color.darker(150))
+                gradient.setColorAt(1, current_color.lighter(120))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(gradient))
 
-            gradient = QLinearGradient(x, y + bar_height, x, y)
-            gradient.setColorAt(0, current_color.darker(150))
-            gradient.setColorAt(1, current_color.lighter(120))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(gradient))
             painter.drawRoundedRect(rect, 4, 4)
 
 # ─────────────────────────────────────────────
