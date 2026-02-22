@@ -66,41 +66,6 @@ class TestAudioProcessor(unittest.TestCase):
         fft_data = self.processor.get_raw_fft(audio_data)
         self.assertGreater(fft_data[0], 0)
 
-    def test_compute_fft_none_input(self):
-        """Test compute_fft with None input."""
-        bars = self.processor.compute_fft(None, 32)
-        self.assertEqual(len(bars), 32)
-        self.assertTrue(np.all(bars == 0.0))
-
-    def test_compute_fft_empty_input(self):
-        """Test compute_fft with empty input."""
-        bars = self.processor.compute_fft([], 32)
-        self.assertEqual(len(bars), 32)
-        self.assertTrue(np.all(bars == 0.0))
-
-    def test_compute_fft_short_input(self):
-        """Test compute_fft with input shorter than buffer size."""
-        # Create a short input with an impulse in the middle
-        short_len = self.buffer_frames // 2
-        audio_data = np.zeros(short_len)
-        audio_data[short_len // 2] = 1.0  # Impulse
-
-        bars = self.processor.compute_fft(audio_data, 32)
-        self.assertEqual(len(bars), 32)
-        # Should produce non-zero output
-        self.assertTrue(np.any(bars > 0.0))
-
-    def test_compute_fft_long_input(self):
-        """Test compute_fft with input longer than buffer size."""
-        long_len = self.buffer_frames * 2
-        audio_data = np.zeros(long_len)
-        # Add impulse in the second half (which corresponds to the processed buffer)
-        # Because implementation takes the LAST buffer_frames: audio_data[-self.buffer_frames:]
-        audio_data[long_len - self.buffer_frames // 2] = 1.0
-
-        bars = self.processor.compute_fft(audio_data, 32)
-        self.assertEqual(len(bars), 32)
-        self.assertTrue(np.any(bars > 0.0))
 
     def test_compute_fft_padding_correctness(self):
          """Test that short input is correctly padded."""
@@ -144,6 +109,8 @@ class TestAudioProcessor(unittest.TestCase):
         # Should return valid normalized values
         self.assertTrue(np.all(bars >= 0.0))
         self.assertTrue(np.all(bars <= 1.0))
+        # Expect some output from non-silent input
+        self.assertTrue(np.any(bars > 0.0))
 
         # 4. Long input (more than buffer_frames)
         long_data = np.ones(self.buffer_frames * 2)
@@ -151,6 +118,8 @@ class TestAudioProcessor(unittest.TestCase):
         self.assertEqual(len(bars), num_bars)
         self.assertTrue(np.all(bars >= 0.0))
         self.assertTrue(np.all(bars <= 1.0))
+        # Expect some output from non-silent input
+        self.assertTrue(np.any(bars > 0.0))
 
     def test_get_raw_fft_edge_cases(self):
         """Test edge cases for get_raw_fft: None, empty, short, long inputs."""
@@ -183,6 +152,77 @@ class TestAudioProcessor(unittest.TestCase):
         self.assertEqual(len(fft_data), expected_len)
         self.assertTrue(np.all(fft_data >= 0.0))
         self.assertTrue(np.all(fft_data <= 1.0))
+
+    def test_init_parameters(self):
+        """Test different initialization parameters."""
+        sample_rate = 48000
+        buffer_frames = 512
+        processor = AudioProcessor(sample_rate=sample_rate, buffer_frames=buffer_frames)
+        self.assertEqual(processor.sample_rate, sample_rate)
+        self.assertEqual(processor.buffer_frames, buffer_frames)
+        self.assertEqual(len(processor.window), buffer_frames)
+
+        # Test compute_fft with new parameters
+        audio_data = np.zeros(buffer_frames)
+        bars = processor.compute_fft(audio_data, 16)
+        self.assertEqual(len(bars), 16)
+
+    def test_frequency_range_clamping(self):
+        """Test min_freq and max_freq clamping behavior."""
+        # Set invalid frequency range
+        self.processor.min_freq = -100
+        self.processor.max_freq = 100000  # Above Nyquist (22050)
+
+        # Create input
+        audio_data = np.random.random(self.buffer_frames)
+        bars = self.processor.compute_fft(audio_data, 32)
+
+        # Should execute without error
+        self.assertEqual(len(bars), 32)
+        self.assertTrue(np.all(bars >= 0.0))
+        self.assertTrue(np.all(bars <= 1.0))
+
+    def test_nan_inf_handling(self):
+        """Test handling of NaN and Inf values in input."""
+        # 1. NaN input
+        nan_data = np.full(self.buffer_frames, np.nan)
+        try:
+            bars = self.processor.compute_fft(nan_data, 32)
+            self.assertEqual(len(bars), 32)
+            # Output should not contain NaNs (robustness check)
+            self.assertFalse(np.any(np.isnan(bars)), "Output contains NaNs")
+        except Exception as e:
+            self.fail(f"compute_fft raised exception on NaN input: {e}")
+
+        # 2. Inf input
+        inf_data = np.full(self.buffer_frames, np.inf)
+        try:
+            bars = self.processor.compute_fft(inf_data, 32)
+            self.assertEqual(len(bars), 32)
+            # Output should not contain NaNs or Infs
+            self.assertFalse(np.any(np.isnan(bars)), "Output contains NaNs")
+            self.assertFalse(np.any(np.isinf(bars)), "Output contains Infs")
+        except Exception as e:
+            self.fail(f"compute_fft raised exception on Inf input: {e}")
+
+    def test_multi_frequency_binning(self):
+        """Test binning logic with low, mid, and high frequencies."""
+        # Frequencies to test: 100Hz, 1000Hz, 10000Hz
+        freqs = [100, 1000, 10000]
+
+        # Verify peak bin index increases with frequency
+        peak_indices = []
+        for freq in freqs:
+            t = np.linspace(0, self.buffer_frames / self.sample_rate, self.buffer_frames, endpoint=False)
+            audio_data = 0.5 * np.sin(2 * np.pi * freq * t)
+            bars = self.processor.compute_fft(audio_data, 32)
+            peak_indices.append(np.argmax(bars))
+
+            # Basic sanity check that we have output
+            self.assertTrue(np.any(bars > 0.0), f"Frequency {freq}Hz produced all-zero bars. Max: {np.max(bars)}")
+
+        self.assertTrue(peak_indices[0] <= peak_indices[1] <= peak_indices[2],
+                        f"Peak indices should increase with frequency. Got {peak_indices}")
 
 if __name__ == '__main__':
     unittest.main()

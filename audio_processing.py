@@ -29,6 +29,10 @@ class AudioProcessor:
         Helper method to compute FFT magnitude in dB.
         Handles padding/truncation and windowing.
         """
+        # Sanitize input: replace NaN/Inf with 0
+        if not np.all(np.isfinite(audio_data)):
+            audio_data = np.nan_to_num(audio_data, nan=0.0, posinf=0.0, neginf=0.0)
+
         # Ensure audio data matches buffer size (pad if necessary)
         if len(audio_data) < self.buffer_frames:
             padded_data = np.zeros(self.buffer_frames)
@@ -88,8 +92,8 @@ class AudioProcessor:
             idx = np.where((freqs >= start_freq) & (freqs < end_freq))[0]
 
             if len(idx) > 0:
-                # Average magnitude in this band
-                binned_values[i] = np.mean(fft_mag[idx])
+                # Use max magnitude in this band to ensure narrow peaks (like sine waves) are visible
+                binned_values[i] = np.max(fft_mag[idx])
             else:
                 # Fallback: If the frequency band is narrower than our FFT resolution
                 # (common for low frequencies with many bars), just grab the closest bin.
