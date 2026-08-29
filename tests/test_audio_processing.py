@@ -51,20 +51,58 @@ class TestAudioProcessor(unittest.TestCase):
     def test_magic_number_consistency(self):
         """Test that output values remain consistent for a constant input."""
         # This test ensures that if we change implementation, output values for specific inputs
-        # remain consistent (regression testing).
+        # remain consistent (regression testing). The values are pinned, not just
+        # checked for positivity, so a change to the dB scale is caught here.
 
         # Use a constant input
         audio_data = np.full(self.buffer_frames, 0.1)
 
-        # Test compute_fft output
-        bars = self.processor.compute_fft(audio_data, 32)
-        # Just check the first bar value to ensure stability
-        # The specific value depends on implementation details
-        self.assertGreater(bars[0], 0)
-
-        # Test get_raw_fft output
+        # A DC level of 0.1 is -20 dBFS, which the [-60, 0] dB display window
+        # maps to 40/60 of full scale.
         fft_data = self.processor.get_raw_fft(audio_data)
-        self.assertGreater(fft_data[0], 0)
+        self.assertAlmostEqual(fft_data[0], 40.0 / 60.0, places=4)
+
+        # The lowest bar spans 20-21 Hz, narrower than the 43 Hz bin spacing, so
+        # it falls back to the closest bin: the window's first sidelobe at half
+        # the DC amplitude (-26 dBFS).
+        bars = self.processor.compute_fft(audio_data, 32)
+        self.assertAlmostEqual(bars[0], 0.56653814, places=6)
+
+    def test_scale_is_independent_of_buffer_size(self):
+        """
+        The same signal must produce the same bar heights at any buffer size.
+
+        FFT magnitude grows linearly with the transform length, so without
+        normalizing by the window's coherent gain the fixed NORMALIZATION_OFFSET
+        and NORMALIZATION_SCALE calibration drifts with buffer_frames -- the
+        tests here (1024) would validate a different amplitude scale than
+        main.py (2048) actually renders.
+        """
+        peaks = []
+        for buffer_frames in (512, 1024, 2048, 4096):
+            processor = AudioProcessor(sample_rate=self.sample_rate,
+                                       buffer_frames=buffer_frames)
+            t = np.arange(buffer_frames) / self.sample_rate
+            tone = 0.1 * np.sin(2 * np.pi * 1000 * t)
+            peaks.append(np.max(processor.get_raw_fft(tone)))
+
+        # Remaining spread is scalloping loss from where the tone falls relative
+        # to bin centers, not a change of scale.
+        self.assertLess(max(peaks) - min(peaks), 0.05,
+                        f"peak level varies with buffer size: {peaks}")
+        for peak in peaks:
+            self.assertGreater(peak, 0.4)
+            self.assertLess(peak, 0.7)
+
+    def test_full_scale_reference_levels(self):
+        """A full-scale DC signal is 0 dBFS; a full-scale sine is -6 dBFS."""
+        dc = self.processor.get_raw_fft(np.ones(self.buffer_frames))
+        self.assertAlmostEqual(dc[0], 1.0, places=6)
+
+        t = np.arange(self.buffer_frames) / self.sample_rate
+        sine = self.processor.get_raw_fft(np.sin(2 * np.pi * 1000 * t))
+        # -6 dBFS in a [-60, 0] dB window is 54/60 of full scale.
+        self.assertAlmostEqual(np.max(sine), 54.0 / 60.0, delta=0.02)
 
 
     def test_compute_fft_padding_correctness(self):

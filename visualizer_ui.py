@@ -1,12 +1,11 @@
-import sys
 import numpy as np
-from collections import deque
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QLabel, QComboBox,
-                             QSpinBox, QGroupBox, QStackedWidget, QPushButton)
+                             QHBoxLayout, QLabel, QSlider,
+                             QStackedWidget, QPushButton)
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QLinearGradient,
-                          QPainterPath, QRadialGradient, QMouseEvent, QFont)
+                         QPainterPath, QRadialGradient, QConicalGradient,
+                         QMouseEvent, QFont, QImage)
 
 class Theme:
     VIZ_BG = QColor(13, 13, 22)
@@ -15,11 +14,13 @@ class Theme:
 
     TEXT_PRIMARY = QColor(240, 240, 245)
     TEXT_SECONDARY = QColor(160, 160, 170)
+    TEXT_ERROR = QColor(255, 120, 120)
 
     SEG_ACTIVE_BG = QColor(255, 255, 255, 20)
     SEG_BORDER = QColor(255, 255, 255, 30)
 
     RADIUS_LG = 14
+    RADIUS_MD = 10
     RADIUS_SM = 6
 
     FONT_SIZE_TITLE = 14
@@ -31,35 +32,100 @@ class Theme:
         f.setWeight(weight)
         return f
 
+# Default visualizer color, matching DEFAULT_COLOR_NAME in MainWindow.
+DEFAULT_COLOR = QColor(0, 200, 255)
+
+# Rainbow animation tick, ~60 FPS. Only runs while rainbow mode is on and the
+# owning widget is visible (see ColorMixin._sync_rainbow_timer).
+RAINBOW_TICK_MS = 16
+
+# ─────────────────────────────────────────────
+#  Shared rainbow palette
+# ─────────────────────────────────────────────
+# Building QColors is expensive relative to a 60 FPS paint budget, so the
+# (base, dark, light) triples are precomputed once per process and shared by
+# every visualizer widget rather than rebuilt per instance or per frame.
+RAINBOW_PALETTE_SIZE = 1024
+_RAINBOW_PALETTE = None
+
+
+def rainbow_palette():
+    """Return the shared rainbow palette, building it on first use."""
+    global _RAINBOW_PALETTE
+    if _RAINBOW_PALETTE is None:
+        palette = []
+        for i in range(RAINBOW_PALETTE_SIZE):
+            color = QColor.fromHsvF(i / RAINBOW_PALETTE_SIZE, 0.75, 1.0)
+            palette.append((color, color.darker(160), color.lighter(130)))
+        _RAINBOW_PALETTE = palette
+    return _RAINBOW_PALETTE
+
+
+def rainbow_colors(fraction):
+    """(base, dark, light) colors for a hue position in [0, 1)."""
+    idx = int((fraction % 1.0) * RAINBOW_PALETTE_SIZE) % RAINBOW_PALETTE_SIZE
+    return rainbow_palette()[idx]
+
+
 # ─────────────────────────────────────────────
 #  Base mixin for shared color / rainbow logic
 # ─────────────────────────────────────────────
 class ColorMixin:
     """Shared color and rainbow state for all visualizer widgets."""
+
+    # Whether a rainbow tick should trigger a repaint. Widgets that bake colors
+    # into a cached surface (the spectrogram) opt out.
+    REPAINT_ON_RAINBOW_TICK = True
+
     def init_color(self):
-        self.bar_color = QColor(88, 130, 255)
+        self.bar_color = QColor(DEFAULT_COLOR)
         self.bg_color = Theme.VIZ_BG
         self.rainbow_mode = False
         self.rainbow_hue = 0.0
 
+        # Left stopped: an idle timer ticking 60 times a second per widget does
+        # nothing useful when rainbow mode is off or the widget is off-screen.
         self.rainbow_timer = QTimer(self)
         self.rainbow_timer.timeout.connect(self._update_rainbow)
-        self.rainbow_timer.start(16)
 
     def set_color(self, color):
         self.rainbow_mode = False
         self.bar_color = color
+        self._sync_rainbow_timer()
+        self.on_palette_changed()
         self.update()
 
     def set_rainbow_mode(self, enabled):
         self.rainbow_mode = enabled
+        self._sync_rainbow_timer()
+        self.on_palette_changed()
+        self.update()
+
+    def on_palette_changed(self):
+        """Hook for subclasses that cache rendered colors."""
+
+    def _sync_rainbow_timer(self):
+        """Run the animation timer only when it can actually be seen."""
+        should_run = self.rainbow_mode and self.isVisible()
+        if should_run and not self.rainbow_timer.isActive():
+            self.rainbow_timer.start(RAINBOW_TICK_MS)
+        elif not should_run and self.rainbow_timer.isActive():
+            self.rainbow_timer.stop()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_rainbow_timer()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._sync_rainbow_timer()
 
     def _update_rainbow(self):
-        if self.rainbow_mode:
-            self.rainbow_hue += 0.005
-            if self.rainbow_hue > 1.0:
-                self.rainbow_hue -= 1.0
-            self.bar_color = QColor.fromHsvF(self.rainbow_hue, 0.8, 1.0)
+        self.rainbow_hue += 0.005
+        if self.rainbow_hue > 1.0:
+            self.rainbow_hue -= 1.0
+        self.bar_color = rainbow_colors(self.rainbow_hue)[0]
+        if self.REPAINT_ON_RAINBOW_TICK:
             self.update()
 
 
@@ -72,14 +138,6 @@ class BarVisualizerWidget(ColorMixin, QWidget):
         self.init_color()
         self.bars = 32
         self.bar_values = np.zeros(self.bars)
-        self._init_rainbow_palette()
-
-    def _init_rainbow_palette(self):
-        self._rainbow_palette = []
-        for i in range(1024):
-            hue = i / 1024.0
-            color = QColor.fromHsvF(hue, 0.75, 1.0)
-            self._rainbow_palette.append((color, color.darker(160), color.lighter(130)))
 
     def set_bars(self, count):
         self.bars = count
@@ -125,10 +183,8 @@ class BarVisualizerWidget(ColorMixin, QWidget):
 
             # Determine color
             if self.rainbow_mode:
-                hue_idx = int(((self.rainbow_hue + i / self.bars) % 1.0) * 1024)
-                # Clamp to palette size
-                hue_idx = hue_idx % 1024
-                current_color, dark_color, light_color = self._rainbow_palette[hue_idx]
+                current_color, dark_color, light_color = rainbow_colors(
+                    self.rainbow_hue + i / self.bars)
             else:
                 current_color = static_color
                 dark_color = static_dark
@@ -183,6 +239,9 @@ class BarVisualizerWidget(ColorMixin, QWidget):
 #  2. Waveform Visualizer
 # ─────────────────────────────────────────────
 class WaveformWidget(ColorMixin, QWidget):
+    # Number of colored segments the rainbow trace is split into.
+    RAINBOW_SEGMENTS = 200
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.init_color()
@@ -192,6 +251,58 @@ class WaveformWidget(ColorMixin, QWidget):
         self.waveform_data = audio_data
         self.update()
 
+    def _plot_points(self, data, width, mid_y):
+        """
+        Map samples to screen coordinates, decimating to one point per pixel
+        column when there are more samples than the display can resolve.
+
+        Each column keeps its largest-magnitude sample, so peaks survive while
+        the vertex count is bounded by widget width rather than buffer size.
+        Stroking cost scales with the path's vertex count and arc length, and
+        vertices closer together than a pixel cannot be seen anyway.
+        """
+        data = np.asarray(data, dtype=float)
+        n = len(data)
+
+        if width > 0 and n > width:
+            cols = width
+            usable = (n // cols) * cols
+            chunks = data[:usable].reshape(cols, -1)
+            peak = np.abs(chunks).argmax(axis=1)
+            values = chunks[np.arange(cols), peak]
+            xs = np.arange(cols) * (width / cols)
+        else:
+            values = data
+            xs = np.arange(n) * (width / n)
+
+        return xs, mid_y - values * mid_y * 0.9
+
+    @staticmethod
+    def _path_from(xs, ys, start=0, stop=None):
+        path = QPainterPath()
+        stop = len(xs) if stop is None else stop
+        if stop <= start:
+            return path
+        path.moveTo(xs[start], ys[start])
+        for i in range(start + 1, stop):
+            path.lineTo(xs[i], ys[i])
+        return path
+
+    def _segment_paths(self, xs, ys):
+        """
+        Split the trace into colored segments, returning (hue, path) pairs.
+        Built once and reused by both the glow and crisp passes.
+        """
+        n = len(xs)
+        segment_size = max(1, n // min(n, self.RAINBOW_SEGMENTS))
+        segments = []
+        for start in range(0, n, segment_size):
+            # +1 so consecutive segments share a point and the trace has no gaps.
+            stop = min(start + segment_size + 1, n)
+            segments.append(((self.rainbow_hue + start / n) % 1.0,
+                             self._path_from(xs, ys, start, stop)))
+        return segments
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -200,7 +311,7 @@ class WaveformWidget(ColorMixin, QWidget):
         w, h = self.width(), self.height()
         mid_y = h / 2.0
         n = len(self.waveform_data)
-        if n == 0:
+        if n == 0 or w <= 0:
             return
 
         # Subtle grid lines
@@ -210,51 +321,25 @@ class WaveformWidget(ColorMixin, QWidget):
             gy = int(h * frac)
             painter.drawLine(0, gy, w, gy)
 
-        # Build waveform path
-        path = QPainterPath()
-        step = w / n
-        for i in range(n):
-            x = i * step
-            y = mid_y - self.waveform_data[i] * mid_y * 0.9
-            if i == 0:
-                path.moveTo(x, y)
-            else:
-                path.lineTo(x, y)
+        xs, ys = self._plot_points(self.waveform_data, w, mid_y)
 
         if self.rainbow_mode:
-            segment_count = min(n, 200)
-            segment_size = max(1, n // segment_count)
+            segments = self._segment_paths(xs, ys)
 
             # Glow pass for rainbow
-            for seg in range(0, n, segment_size):
-                glow_path = QPainterPath()
-                hue = (self.rainbow_hue + seg / n) % 1.0
-                glow_color = QColor.fromHsvF(hue, 0.7, 1.0, 0.25)
-                for j in range(seg, min(seg + segment_size + 1, n)):
-                    x = j * step
-                    y = mid_y - self.waveform_data[j] * mid_y * 0.9
-                    if j == seg:
-                        glow_path.moveTo(x, y)
-                    else:
-                        glow_path.lineTo(x, y)
+            for hue, path in segments:
+                glow_color = QColor(rainbow_colors(hue)[0])
+                glow_color.setAlpha(64)
                 painter.setPen(QPen(glow_color, 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                painter.drawPath(glow_path)
+                painter.drawPath(path)
 
             # Crisp pass for rainbow
-            for seg in range(0, n, segment_size):
-                seg_path = QPainterPath()
-                hue = (self.rainbow_hue + seg / n) % 1.0
-                pen = QPen(QColor.fromHsvF(hue, 0.8, 1.0), 2)
-                for j in range(seg, min(seg + segment_size + 1, n)):
-                    x = j * step
-                    y = mid_y - self.waveform_data[j] * mid_y * 0.9
-                    if j == seg:
-                        seg_path.moveTo(x, y)
-                    else:
-                        seg_path.lineTo(x, y)
-                painter.setPen(pen)
-                painter.drawPath(seg_path)
+            for hue, path in segments:
+                painter.setPen(QPen(rainbow_colors(hue)[0], 2))
+                painter.drawPath(path)
         else:
+            path = self._path_from(xs, ys)
+
             # Glow pass
             glow_color = QColor(self.bar_color)
             glow_color.setAlpha(50)
@@ -266,19 +351,63 @@ class WaveformWidget(ColorMixin, QWidget):
             painter.drawPath(path)
 
 
+# Spectrogram color tables depend only on the image row count, so they are
+# built once per row count and shared by every spectrogram instance.
+_SPECTROGRAM_LUTS = {}
+
+
+def _spectrogram_luts(widget):
+    """(viridis, rainbow) lookup tables for a spectrogram of `widget.rows` rows."""
+    luts = _SPECTROGRAM_LUTS.get(widget.rows)
+    if luts is None:
+        luts = (widget._build_viridis_lut(), widget._build_rainbow_lut())
+        _SPECTROGRAM_LUTS[widget.rows] = luts
+    return luts
+
+
 # ─────────────────────────────────────────────
 #  3. Spectrogram Visualizer
 # ─────────────────────────────────────────────
 class SpectrogramWidget(ColorMixin, QWidget):
+    """
+    Scrolling spectrogram rendered as a single image.
+
+    The history is kept as an off-screen ARGB buffer that is scrolled one
+    column per frame; paintEvent blits it in one call and lets Qt scale it to
+    the widget. This keeps every FFT bin on screen regardless of widget height
+    (bins are max-reduced onto IMAGE_ROWS rows) and replaces the
+    columns x bins grid of fillRect calls that could not hold 60 FPS.
+    """
+
+    # Vertical resolution of the spectrogram image; scaled to the widget on
+    # paint, so it is independent of the window size.
+    IMAGE_ROWS = 256
+
+    # Intensities at or below this index render as background, matching the
+    # previous "skip near-silent cells" behaviour.
+    SILENCE_INDEX = 2
+
+    # Colors are baked into each column as it arrives, so a rainbow history
+    # keeps the hue it was drawn with instead of being recolored every tick.
+    REPAINT_ON_RAINBOW_TICK = False
+
     def __init__(self, parent=None, history_length=200):
         super().__init__(parent)
         self.init_color()
         self.history_length = history_length
-        self.fft_history = deque(maxlen=history_length)
+        self.rows = self.IMAGE_ROWS
 
-    def update_fft(self, fft_data):
-        self.fft_history.append(fft_data)
-        self.update()
+        # Intensity indices (0-255) per image pixel, kept so the image can be
+        # rebuilt when the palette changes. Column 0 is oldest, row 0 is the
+        # top of the widget (highest frequency).
+        self._intensity = np.zeros((self.rows, history_length), dtype=np.uint8)
+        self._argb = np.zeros((self.rows, history_length), dtype=np.uint32)
+
+        self._viridis_lut, self._rainbow_lut = _spectrogram_luts(self)
+        self._row_edge_cache = {}
+        self._rebuild_image()
+
+    # ── Color lookup tables ──
 
     def _viridis_color(self, t):
         """Attempt a perceptually-uniform viridis-style colormap."""
@@ -297,37 +426,107 @@ class SpectrogramWidget(ColorMixin, QWidget):
             r, g, b = 0.5 + 0.5 * s, 0.7 + 0.2 * s, 0.45 - 0.3 * s
         return QColor.fromRgbF(min(r, 1), min(g, 1), min(b, 1))
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), self.bg_color)
+    @staticmethod
+    def _pack(r, g, b):
+        """Pack RGB arrays into Format_RGB32 words (0xffRRGGBB)."""
+        return (0xFF000000
+                | (r.astype(np.uint32) << 16)
+                | (g.astype(np.uint32) << 8)
+                | b.astype(np.uint32))
 
-        w, h = self.width(), self.height()
-        num_cols = len(self.fft_history)
-        if num_cols == 0:
+    def _silence_argb(self):
+        c = self.bg_color
+        return 0xFF000000 | (c.red() << 16) | (c.green() << 8) | c.blue()
+
+    def _build_viridis_lut(self):
+        colors = [self._viridis_color(i / 255.0) for i in range(256)]
+        rgb = np.array([[c.red(), c.green(), c.blue()] for c in colors])
+        lut = self._pack(rgb[:, 0], rgb[:, 1], rgb[:, 2])
+        lut[:self.SILENCE_INDEX + 1] = self._silence_argb()
+        return lut
+
+    def _build_rainbow_lut(self):
+        """
+        (rows, 256) table of hue-by-row, brightness-by-intensity colors.
+
+        HSV value scales R, G and B linearly, so one fully-bright color per row
+        is enough — the 256 intensity levels are a vectorized multiply rather
+        than 65,536 QColor constructions.
+        """
+        # Row 0 is the top of the widget, i.e. the highest frequency.
+        hues = [(self.rows - 1 - r) / self.rows for r in range(self.rows)]
+        base = np.array([[c.red(), c.green(), c.blue()]
+                         for c in (QColor.fromHsvF(h, 0.8, 1.0) for h in hues)],
+                        dtype=np.float64)
+        levels = np.arange(256) / 255.0
+        rgb = base[:, None, :] * levels[None, :, None]
+        lut = self._pack(rgb[..., 0], rgb[..., 1], rgb[..., 2])
+        lut[:, :self.SILENCE_INDEX + 1] = self._silence_argb()
+        return lut
+
+    def _rainbow_row_index(self):
+        """Row-to-hue mapping, rotated so the rainbow drifts over time."""
+        offset = int(self.rainbow_hue * self.rows) % self.rows
+        return (np.arange(self.rows) + offset) % self.rows
+
+    def _column_colors(self, column):
+        if self.rainbow_mode:
+            return self._rainbow_lut[self._rainbow_row_index(), column]
+        return self._viridis_lut[column]
+
+    def _rebuild_image(self):
+        if self.rainbow_mode:
+            rows_idx = self._rainbow_row_index()
+            self._argb[:] = self._rainbow_lut[rows_idx[:, None], self._intensity]
+        else:
+            self._argb[:] = self._viridis_lut[self._intensity]
+
+    def on_palette_changed(self):
+        self._rebuild_image()
+
+    # ── Data ──
+
+    def _row_edges(self, num_bins):
+        """
+        Cached reduceat edges mapping `num_bins` FFT bins onto `rows` image
+        rows. Every bin contributes to exactly one row, so nothing is clipped
+        off the top of the widget no matter how many bins there are.
+        """
+        edges = self._row_edge_cache.get(num_bins)
+        if edges is None:
+            edges = np.linspace(0, num_bins, self.rows + 1).astype(int)
+            # reduceat needs in-range starts; equal consecutive starts (rows
+            # finer than the FFT) fall back to that single bin's value.
+            edges[:-1] = np.minimum(edges[:-1], num_bins - 1)
+            self._row_edge_cache[num_bins] = edges
+        return edges
+
+    def update_fft(self, fft_data):
+        fft_data = np.asarray(fft_data, dtype=float)
+        if fft_data.size == 0:
             return
 
-        col_width = max(1.0, w / self.history_length)
+        edges = self._row_edges(fft_data.size)
+        # Max-reduce bins into rows (peaks survive), then flip so row 0 is the
+        # highest frequency at the top of the widget.
+        row_values = np.maximum.reduceat(fft_data, edges[:-1])[::-1]
+        column = (np.clip(row_values, 0.0, 1.0) * 255).astype(np.uint8)
 
-        for col_idx, fft_slice in enumerate(self.fft_history):
-            x = int(col_idx * col_width)
-            num_bins = len(fft_slice)
-            if num_bins == 0:
-                continue
-            bin_height = max(1.0, h / num_bins)
+        # Scroll one column left and append the new column on the right.
+        self._intensity[:, :-1] = self._intensity[:, 1:]
+        self._intensity[:, -1] = column
+        self._argb[:, :-1] = self._argb[:, 1:]
+        self._argb[:, -1] = self._column_colors(column)
 
-            for bin_idx in range(num_bins):
-                intensity = max(0.0, min(1.0, fft_slice[bin_idx]))
-                if intensity < 0.01:
-                    continue
-                y = int(h - (bin_idx + 1) * bin_height)
+        self.update()
 
-                if self.rainbow_mode:
-                    hue = (self.rainbow_hue + bin_idx / num_bins) % 1.0
-                    color = QColor.fromHsvF(hue, 0.8, intensity)
-                else:
-                    color = self._viridis_color(intensity)
-
-                painter.fillRect(QRectF(x, y, col_width + 1, bin_height + 1), color)
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        # Constructed per paint so it always wraps the current buffer contents.
+        image = QImage(self._argb.data, self.history_length, self.rows,
+                       self.history_length * 4, QImage.Format.Format_RGB32)
+        painter.drawImage(self.rect(), image)
 
 
 # ─────────────────────────────────────────────
@@ -363,7 +562,10 @@ class SegmentButton(QPushButton):
             painter.setPen(Theme.TEXT_SECONDARY)
 
         painter.setFont(self.font())
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.text())
+        # Qt keeps the mnemonic marker in text(); strip it for display so the
+        # button reads "Bars", not "&Bars".
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter,
+                         self.text().replace("&&", "\0").replace("&", "").replace("\0", "&"))
 
 
 # ─────────────────────────────────────────────
@@ -379,6 +581,7 @@ class ColorSwatch(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(28, 28)
         self.setToolTip(name)
+        self.setAccessibleName(name)
         self.setStyleSheet("border: none; background: transparent;")
 
     def set_active(self, active):
@@ -393,15 +596,15 @@ class ColorSwatch(QPushButton):
         radius = 10
 
         if self.is_rainbow:
-            # Draw a rainbow gradient circle
-            for angle in range(360):
-                hue = angle / 360.0
-                color = QColor.fromHsvF(hue, 0.85, 1.0)
-                painter.setPen(QPen(color, 2))
-                import math
-                px = cx + (radius - 1) * math.cos(math.radians(angle))
-                py = cy + (radius - 1) * math.sin(math.radians(angle))
-                painter.drawPoint(int(px), int(py))
+            # Rainbow ring as a single stroked ellipse with a conical gradient,
+            # rather than 360 individually-drawn points.
+            ring = QConicalGradient(QPointF(cx, cy), 0.0)
+            for i in range(13):
+                stop = i / 12.0
+                ring.setColorAt(stop, QColor.fromHsvF(min(stop, 0.999), 0.85, 1.0))
+            painter.setPen(QPen(QBrush(ring), 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QPointF(cx, cy), radius - 1, radius - 1)
             # Fill center
             grad = QRadialGradient(cx, cy, radius * 0.65)
             grad.setColorAt(0, QColor(255, 255, 255, 80))
@@ -447,7 +650,7 @@ class GlassPanel(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = self.rect().adjusted(0, 0, 0, 0)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         painter.setBrush(QBrush(Theme.BG_GLASS))
         painter.setPen(QPen(Theme.BG_GLASS_BORDER, 1))
         painter.drawRoundedRect(rect, Theme.RADIUS_LG, Theme.RADIUS_LG)
@@ -470,7 +673,7 @@ class TitleBar(QWidget):
         # Title label
         title_label = QLabel("Audio Visualizer")
         title_label.setFont(Theme.font(Theme.FONT_SIZE_TITLE, QFont.Weight.DemiBold))
-        title_label.setStyleSheet(f"color: rgba(240,240,245,0.9); background: transparent;")
+        title_label.setStyleSheet("color: rgba(240,240,245,0.9); background: transparent;")
         layout.addWidget(title_label)
 
         layout.addStretch()
@@ -495,6 +698,8 @@ class TitleBar(QWidget):
         self.min_btn.setFixedSize(34, 26)
         self.min_btn.setStyleSheet(btn_style_base.format(radius=6, font_size=12))
         self.min_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.min_btn.setToolTip("Minimize")
+        self.min_btn.setAccessibleName("Minimize")
         self.min_btn.clicked.connect(self.parent_window.showMinimized)
         layout.addWidget(self.min_btn)
 
@@ -518,6 +723,8 @@ class TitleBar(QWidget):
         """
         self.close_btn.setStyleSheet(close_style)
         self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_btn.setToolTip("Close")
+        self.close_btn.setAccessibleName("Close")
         self.close_btn.clicked.connect(self.parent_window.close)
         layout.addWidget(self.close_btn)
 
@@ -550,6 +757,18 @@ class TitleBar(QWidget):
 #  Main Window
 # ─────────────────────────────────────────────
 class MainWindow(QMainWindow):
+    # (button label with mnemonic, mode name, stack index)
+    MODES = (("&Bars", "Bars", 0),
+             ("&Wave", "Waveform", 1),
+             ("&Spectrum", "Spectrogram", 2))
+
+    DEFAULT_COLOR_NAME = "Cyan"
+
+    BAR_COUNT_MIN = 8
+    BAR_COUNT_MAX = 128
+    BAR_COUNT_STEP = 8
+    BAR_COUNT_DEFAULT = 32
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Audio Visualizer")
@@ -564,9 +783,12 @@ class MainWindow(QMainWindow):
         self.waveform_widget = WaveformWidget()
         self.spectrogram_widget = SpectrogramWidget()
 
-        # Compat reference
-        self.visualizer = self.bar_widget
         self.current_mode = "Bars"
+        self._current_color_name = self.DEFAULT_COLOR_NAME
+
+        # Assigned by the application to observe control changes.
+        self.on_bars_changed_callback = None
+        self.on_mode_changed_callback = None
 
         self._build_ui()
 
@@ -600,50 +822,136 @@ class MainWindow(QMainWindow):
 
         # Visualization stack
         self.stack = QStackedWidget()
-        self.stack.addWidget(self.bar_widget)        # index 0
-        self.stack.addWidget(self.waveform_widget)    # index 1
-        self.stack.addWidget(self.spectrogram_widget) # index 2
-        main_layout.addWidget(self.stack, stretch=1)
+        self.stack.setStyleSheet("background: transparent; border-radius: 10px;")
+        self.stack.addWidget(self.bar_widget)         # index 0
+        self.stack.addWidget(self.waveform_widget)     # index 1
+        self.stack.addWidget(self.spectrogram_widget)  # index 2
+        content_layout.addWidget(self.stack, stretch=1)
 
-        # Controls Group
-        controls_group = QGroupBox("Settings")
-        controls_layout = QHBoxLayout(controls_group)
+        # ── Controls panel (glass) ──
+        glass = GlassPanel()
+        glass.setFixedHeight(72)
+        glass_layout = QHBoxLayout(glass)
+        glass_layout.setContentsMargins(16, 10, 16, 10)
+        glass_layout.setSpacing(20)
 
-        # Mode selector
-        mode_layout = QHBoxLayout()
-        mode_label = QLabel("&Mode:")
-        mode_layout.addWidget(mode_label)
-        self.mode_combo = QComboBox()
-        self.mode_combo.setToolTip("Select the visualization type (Alt+M)")
-        mode_label.setBuddy(self.mode_combo)
-        self.mode_combo.addItems(["Bars", "Waveform", "Spectrogram"])
-        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
-        mode_layout.addWidget(self.mode_combo)
-        controls_layout.addLayout(mode_layout)
+        glass_layout.addWidget(self._build_mode_control())
+        glass_layout.addWidget(self._separator())
+        glass_layout.addWidget(self._build_bar_count_control())
+        glass_layout.addWidget(self._separator())
+        glass_layout.addLayout(self._build_color_control())
+        glass_layout.addStretch()
+        glass_layout.addWidget(self._build_status_label())
 
-        # Bar Count Control
-        self.bar_count_layout_widget = QWidget()
-        bar_count_layout = QHBoxLayout(self.bar_count_layout_widget)
+        content_layout.addWidget(glass)
+        outer_layout.addWidget(content, stretch=1)
+
+        # Reflect the default selection in the visualizers. Without this the
+        # active swatch and the rendered color would disagree until first click.
+        self._apply_current_color()
+
+    # ── Control construction ──
+
+    def _separator(self):
+        sep = QWidget()
+        sep.setFixedSize(1, 32)
+        sep.setStyleSheet("background: rgba(255,255,255,0.1);")
+        return sep
+
+    def _control_label(self, text):
+        label = QLabel(text)
+        label.setFont(Theme.font(Theme.FONT_SIZE_SMALL))
+        label.setStyleSheet("color: rgba(160,160,175,0.9); background: transparent;")
+        return label
+
+    def _build_mode_control(self):
+        mode_container = QWidget()
+        mode_container.setStyleSheet(f"""
+            background: rgba(255,255,255,0.05);
+            border-radius: {Theme.RADIUS_MD}px;
+            border: 1px solid rgba(255,255,255,0.08);
+        """)
+        mode_layout = QHBoxLayout(mode_container)
+        mode_layout.setContentsMargins(3, 3, 3, 3)
+        mode_layout.setSpacing(2)
+
+        self.mode_buttons = []
+        for label, mode, _index in self.MODES:
+            btn = SegmentButton(label)
+            # The mnemonic in `label` gives each mode an Alt+key shortcut; the
+            # accessible name keeps screen readers off the raw marker text.
+            btn.setAccessibleName(mode)
+            btn.setToolTip(f"Show the {mode} visualization "
+                           f"(Alt+{label[label.index('&') + 1]})")
+            btn.mode = mode
+            btn.clicked.connect(lambda checked, m=mode: self._on_segment_clicked(m))
+            mode_layout.addWidget(btn)
+            self.mode_buttons.append(btn)
+
+        self._sync_mode_buttons()
+        return mode_container
+
+    def _build_bar_count_control(self):
+        self.bar_count_container = QWidget()
+        bar_count_layout = QHBoxLayout(self.bar_count_container)
         bar_count_layout.setContentsMargins(0, 0, 0, 0)
-        bar_label = QLabel("&Bars:")
-        bar_count_layout.addWidget(bar_label)
-        self.bar_spinbox = QSpinBox()
-        self.bar_spinbox.setToolTip("Adjust the number of frequency bars (Alt+B)")
-        bar_label.setBuddy(self.bar_spinbox)
-        self.bar_spinbox.setRange(8, 256)
-        self.bar_spinbox.setValue(32)
-        self.bar_spinbox.setSingleStep(8)
-        self.bar_spinbox.valueChanged.connect(self._on_bars_changed)
-        bar_count_layout.addWidget(self.bar_spinbox)
-        controls_layout.addWidget(self.bar_count_layout_widget)
+        bar_count_layout.setSpacing(8)
 
-        # Color Combo Box
+        bars_label = self._control_label("&Count")
+        bar_count_layout.addWidget(bars_label)
+
+        self.bar_slider = QSlider(Qt.Orientation.Horizontal)
+        self.bar_slider.setRange(self.BAR_COUNT_MIN, self.BAR_COUNT_MAX)
+        self.bar_slider.setValue(self.BAR_COUNT_DEFAULT)
+        self.bar_slider.setSingleStep(self.BAR_COUNT_STEP)
+        self.bar_slider.setPageStep(self.BAR_COUNT_STEP * 2)
+        self.bar_slider.setFixedWidth(100)
+        self.bar_slider.setToolTip("Adjust the number of frequency bars (Alt+C)")
+        self.bar_slider.setAccessibleName("Bar count")
+        bars_label.setBuddy(self.bar_slider)
+        self.bar_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                background: rgba(255,255,255,0.08);
+                height: 4px;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #7a9aff, stop:1 #5882ff);
+                width: 14px;
+                height: 14px;
+                margin: -5px 0;
+                border-radius: 7px;
+                border: 1px solid rgba(255,255,255,0.15);
+            }
+            QSlider::handle:horizontal:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #8eabff, stop:1 #6d95ff);
+            }
+            QSlider::sub-page:horizontal {
+                background: rgba(88,130,255,0.35);
+                border-radius: 2px;
+            }
+        """)
+        self.bar_slider.valueChanged.connect(self._on_bars_changed)
+        bar_count_layout.addWidget(self.bar_slider)
+
+        self.bar_count_label = QLabel(str(self.BAR_COUNT_DEFAULT))
+        self.bar_count_label.setFont(Theme.font(Theme.FONT_SIZE_SMALL, QFont.Weight.Medium))
+        self.bar_count_label.setFixedWidth(28)
+        self.bar_count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.bar_count_label.setStyleSheet("color: rgba(240,240,245,0.85); background: transparent;")
+        bar_count_layout.addWidget(self.bar_count_label)
+
+        return self.bar_count_container
+
+    def _build_color_control(self):
         color_layout = QHBoxLayout()
-        color_label = QLabel("&Color:")
+        color_layout.setContentsMargins(0, 0, 0, 0)
+        color_layout.setSpacing(8)
+
+        color_label = self._control_label("C&olor")
         color_layout.addWidget(color_label)
-        self.color_combo = QComboBox()
-        self.color_combo.setToolTip("Choose the color theme (Alt+C)")
-        color_label.setBuddy(self.color_combo)
 
         self.color_map = {
             "Rainbow": None,
@@ -668,60 +976,83 @@ class MainWindow(QMainWindow):
             swatch_layout.addWidget(swatch)
             self.swatches.append(swatch)
 
-        # Default to Cyan (index 1)
-        self.swatches[1].set_active(True)
+        # Alt+O reaches the swatch strip; arrow keys move within it.
+        color_label.setBuddy(self.swatches[0])
+        self._sync_swatches()
 
-        glass_layout.addLayout(swatch_layout)
-        glass_layout.addStretch()
+        color_layout.addLayout(swatch_layout)
+        return color_layout
 
-        content_layout.addWidget(glass)
-        outer_layout.addWidget(content, stretch=1)
+    def _build_status_label(self):
+        self.status_label = QLabel("")
+        self.status_label.setFont(Theme.font(Theme.FONT_SIZE_SMALL))
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("color: rgba(160,160,175,0.9); background: transparent;")
+        self.status_label.setVisible(False)
+        return self.status_label
+
+    def set_status(self, message, is_error=False):
+        """Show a short status message in the controls panel, or clear it."""
+        self.status_label.setText(message or "")
+        self.status_label.setVisible(bool(message))
+        color = Theme.TEXT_ERROR if is_error else Theme.TEXT_SECONDARY
+        self.status_label.setStyleSheet(
+            f"color: rgba({color.red()},{color.green()},{color.blue()},0.95); "
+            "background: transparent;")
+        if message:
+            self.status_label.setToolTip(message)
 
     # ── Helpers ──
 
     def _active_widget(self):
         return self.stack.currentWidget()
 
-    def _on_segment_clicked(self, label):
-        mode_map = {"Bars": "Bars", "Wave": "Waveform", "Spectrum": "Spectrogram"}
-        index_map = {"Bars": 0, "Wave": 1, "Spectrum": 2}
-
+    def _sync_mode_buttons(self):
         for btn in self.mode_buttons:
-            btn.setChecked(btn.text() == label)
+            btn.setChecked(btn.mode == self.current_mode)
 
-        self.current_mode = mode_map.get(label, "Bars")
-        self.stack.setCurrentIndex(index_map.get(label, 0))
+    def _sync_swatches(self):
+        for swatch in self.swatches:
+            swatch.set_active(swatch.swatch_name == self._current_color_name)
+
+    def _on_segment_clicked(self, mode):
+        index = next((i for _label, m, i in self.MODES if m == mode), 0)
+
+        self.current_mode = mode
+        self._sync_mode_buttons()
+        self.stack.setCurrentIndex(index)
 
         # Show bar count only in Bars mode
-        self.bar_count_container.setVisible(label == "Bars")
+        self.bar_count_container.setVisible(mode == "Bars")
 
-        if hasattr(self, "on_mode_changed_callback"):
+        if self.on_mode_changed_callback is not None:
             self.on_mode_changed_callback(self.current_mode)
 
         # Re-apply color to new widget
         self._apply_current_color()
 
     def _on_bars_changed(self, value):
-        # Snap to multiples of 8
-        snapped = max(8, (value // 8) * 8)
+        # Snap to multiples of the step size
+        snapped = max(self.BAR_COUNT_MIN,
+                      (value // self.BAR_COUNT_STEP) * self.BAR_COUNT_STEP)
         if snapped != value:
+            # Write the snapped value back so the slider and the rendered bar
+            # count never disagree; blocked to avoid re-entering this slot.
             self.bar_slider.blockSignals(True)
             self.bar_slider.setValue(snapped)
             self.bar_slider.blockSignals(False)
         self.bar_count_label.setText(str(snapped))
         self.bar_widget.set_bars(snapped)
-        if hasattr(self, "on_bars_changed_callback"):
+        if self.on_bars_changed_callback is not None:
             self.on_bars_changed_callback(snapped)
 
     def _on_color_swatch_clicked(self, color_name):
-        for swatch in self.swatches:
-            swatch.set_active(swatch.swatch_name == color_name)
         self._current_color_name = color_name
+        self._sync_swatches()
         self._apply_current_color()
 
     def _apply_current_color(self):
-        name = getattr(self, '_current_color_name', 'Cyan')
-        color = self.color_map.get(name)
+        color = self.color_map.get(self._current_color_name)
         for widget in [self.bar_widget, self.waveform_widget, self.spectrogram_widget]:
             if color is None:
                 widget.set_rainbow_mode(True)
