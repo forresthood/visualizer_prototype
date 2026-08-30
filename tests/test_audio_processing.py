@@ -262,5 +262,66 @@ class TestAudioProcessor(unittest.TestCase):
         self.assertTrue(peak_indices[0] <= peak_indices[1] <= peak_indices[2],
                         f"Peak indices should increase with frequency. Got {peak_indices}")
 
+
+class TestSampleRateRetuning(unittest.TestCase):
+    """
+    A file being played back sets the sample rate, not the capture device, so
+    the analysis has to follow it.
+    """
+
+    def setUp(self):
+        self.processor = AudioProcessor(sample_rate=44100, buffer_frames=2048)
+
+    def test_bin_frequencies_follow_the_new_rate(self):
+        self.processor.set_sample_rate(48000)
+
+        self.assertEqual(self.processor.sample_rate, 48000)
+        self.assertAlmostEqual(self.processor.freqs[-1], 24000.0)
+        np.testing.assert_allclose(
+            self.processor.freqs, np.fft.rfftfreq(2048, 1.0 / 48000))
+
+    def test_band_cache_is_rebuilt_for_the_new_rate(self):
+        """Stale band edges would map every bar to the wrong frequencies."""
+        self.processor.compute_fft(np.zeros(2048), 32)
+        self.assertTrue(self.processor._band_cache)
+
+        self.processor.set_sample_rate(8000)
+        self.assertFalse(self.processor._band_cache)
+
+    def test_a_tone_reads_at_its_true_frequency_at_any_rate(self):
+        """
+        A 1 kHz tone must peak in the band that spans 1 kHz whichever rate the
+        file was recorded at. Which band that is differs between rates, since
+        the log-spaced bands stop at Nyquist; the frequency it stands for
+        must not.
+        """
+        num_bars = 32
+        for rate in (22050, 44100, 48000):
+            with self.subTest(rate=rate):
+                processor = AudioProcessor(sample_rate=44100, buffer_frames=2048)
+                processor.set_sample_rate(rate)
+
+                t = np.arange(2048) / rate
+                bins = processor.compute_fft(np.sin(2 * np.pi * 1000 * t), num_bars)
+                peak = int(np.argmax(bins))
+
+                edges = np.logspace(np.log10(processor.min_freq),
+                                    np.log10(min(processor.max_freq, rate / 2)),
+                                    num_bars + 1)
+                self.assertLessEqual(edges[peak], 1000.0)
+                self.assertGreaterEqual(edges[peak + 1], 1000.0)
+
+    def test_unchanged_and_invalid_rates_are_ignored(self):
+        self.processor.compute_fft(np.zeros(2048), 32)
+        cached = dict(self.processor._band_cache)
+
+        for rate in (44100, 0, -1):
+            with self.subTest(rate=rate):
+                self.processor.set_sample_rate(rate)
+                self.assertEqual(self.processor.sample_rate, 44100)
+                # An ignored call must not throw the cache away either.
+                self.assertEqual(list(self.processor._band_cache), list(cached))
+
+
 if __name__ == '__main__':
     unittest.main()

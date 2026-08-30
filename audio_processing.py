@@ -33,12 +33,29 @@ class AudioProcessor:
         # it makes the dB scale independent of buffer_frames (see constants).
         self._window_gain = float(np.sum(self.window)) or 1.0
 
-        # Frequencies of the rfft output bins. Depends only on constructor
-        # arguments, so it is computed once instead of on every frame.
+        # Frequencies of the rfft output bins. Depends only on the sample rate
+        # and buffer size, so it is computed once instead of on every frame.
         self.freqs = np.fft.rfftfreq(buffer_frames, 1.0 / sample_rate)
 
         # Cache of log-spaced band edges, keyed by (num_bars, min_freq, max_freq).
         self._band_cache = {}
+
+    def set_sample_rate(self, sample_rate):
+        """
+        Retune the analysis to a new sample rate.
+
+        A file being played back sets the rate, not the capture device, so the
+        bin frequencies (and the bands derived from them) have to be rebuilt
+        when the source changes. No-op when the rate is unchanged, so callers
+        can set it unconditionally.
+        """
+        sample_rate = int(sample_rate)
+        if sample_rate <= 0 or sample_rate == self.sample_rate:
+            return
+        self.sample_rate = sample_rate
+        self.freqs = np.fft.rfftfreq(self.buffer_frames, 1.0 / sample_rate)
+        # Band edges are derived from self.freqs and from sample_rate / 2.
+        self._band_cache.clear()
 
     def _calculate_fft_magnitude(self, audio_data):
         """
