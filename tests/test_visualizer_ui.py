@@ -276,7 +276,19 @@ class TestWaveformWidget(unittest.TestCase):
         mid_y = 200.0
         _xs, ys = widget._plot_points(data, 400, mid_y)
         # The spike must still pull a point away from the center line.
-        self.assertAlmostEqual(float(ys.min()), mid_y - 0.9 * mid_y * 0.9, places=6)
+        self.assertAlmostEqual(min(ys), mid_y - 0.9 * mid_y * 0.9, places=6)
+
+    def test_plot_points_returns_plain_floats(self):
+        """
+        QPainterPath is built from these in a per-point loop; numpy scalars
+        make that loop ~1.8x slower for identical geometry.
+        """
+        widget = WaveformWidget()
+        xs, ys = widget._plot_points(np.zeros(4000), 400, 200.0)
+        self.assertIsInstance(xs, list)
+        self.assertIsInstance(ys, list)
+        self.assertIsInstance(xs[0], float)
+        self.assertIsInstance(ys[0], float)
 
 
 if __name__ == '__main__':
