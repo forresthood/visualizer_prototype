@@ -7,6 +7,7 @@ in the suite noticed because no test instantiated a widget.
 """
 import os
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -23,8 +24,10 @@ except ImportError:  # pragma: no cover - environment without PyQt6
     PYQT_AVAILABLE = False
 
 if PYQT_AVAILABLE:
+    from PyQt6.QtCore import Qt
     from visualizer_ui import (MainWindow, SpectrogramWidget, WaveformWidget,
-                               BarVisualizerWidget)
+                               BarVisualizerWidget, PlaybackBar,
+                               format_duration)
 
 _app = None
 
@@ -289,6 +292,218 @@ class TestWaveformWidget(unittest.TestCase):
         self.assertIsInstance(ys, list)
         self.assertIsInstance(xs[0], float)
         self.assertIsInstance(ys[0], float)
+
+
+@unittest.skipUnless(PYQT_AVAILABLE, "PyQt6 is not installed")
+class TestFormatDuration(unittest.TestCase):
+    """Track times shown next to the seek slider."""
+
+    def test_formats_minutes_and_seconds(self):
+        self.assertEqual(format_duration(0), "0:00")
+        self.assertEqual(format_duration(9), "0:09")
+        self.assertEqual(format_duration(65), "1:05")
+        self.assertEqual(format_duration(599.9), "9:59")
+
+    def test_formats_hours_once_past_the_hour(self):
+        self.assertEqual(format_duration(3600), "1:00:00")
+        self.assertEqual(format_duration(3725), "1:02:05")
+
+    def test_nonsense_durations_do_not_raise(self):
+        for value in (None, -1, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                self.assertEqual(format_duration(value), "0:00")
+
+
+@unittest.skipUnless(PYQT_AVAILABLE, "PyQt6 is not installed")
+class TestPlaybackBar(unittest.TestCase):
+    """The file transport: visibility, seeking and the play/pause state."""
+
+    def setUp(self):
+        self.bar = PlaybackBar()
+        self.seeks = []
+        self.bar.on_seek = self.seeks.append
+        self.play_pauses = []
+        self.bar.on_play_pause = lambda: self.play_pauses.append(True)
+        self.closes = []
+        self.bar.on_close = lambda: self.closes.append(True)
+
+    def test_hidden_until_a_file_is_loaded(self):
+        self.assertFalse(self.bar.isVisible())
+
+    def test_set_track_shows_the_bar_and_its_times(self):
+        self.bar.set_track("song.flac", 125.0)
+
+        self.assertTrue(self.bar.isVisible())
+        self.assertEqual(self.bar.duration_label.text(), "2:05")
+        self.assertEqual(self.bar.position_label.text(), "0:00")
+        self.assertEqual(self.bar.seek_slider.maximum(), 125000)
+        self.assertEqual(self.bar.seek_slider.value(), 0)
+
+    def test_long_names_are_elided_but_kept_in_the_tooltip(self):
+        name = "A Really Quite Excessively Long Track Name Indeed.flac"
+        self.bar.set_track(name, 10.0)
+
+        self.assertEqual(self.bar.track_label.toolTip(), name)
+        self.assertLess(len(self.bar.track_label.text()), len(name))
+
+    def test_clear_track_hides_the_bar(self):
+        self.bar.set_track("song.flac", 10.0)
+        self.bar.clear_track()
+        self.assertFalse(self.bar.isVisible())
+
+    def test_position_moves_the_slider_without_seeking(self):
+        """App-driven position updates must not echo back as seek requests."""
+        self.bar.set_track("song.flac", 100.0)
+        self.bar.set_position(42.0)
+
+        self.assertEqual(self.bar.seek_slider.value(), 42000)
+        self.assertEqual(self.bar.position_label.text(), "0:42")
+        self.assertEqual(self.seeks, [])
+
+    def test_dragging_the_slider_seeks_on_release(self):
+        self.bar.set_track("song.flac", 100.0)
+
+        self.bar.seek_slider.sliderPressed.emit()
+        self.bar.seek_slider.setValue(30000)
+        self.bar.seek_slider.sliderMoved.emit(30000)
+        # Mid-drag the label previews the target but no seek has happened yet.
+        self.assertEqual(self.bar.position_label.text(), "0:30")
+        self.assertEqual(self.seeks, [])
+
+        self.bar.seek_slider.sliderReleased.emit()
+        self.assertEqual(self.seeks, [30.0])
+
+    def test_playback_position_is_ignored_while_scrubbing(self):
+        self.bar.set_track("song.flac", 100.0)
+        self.bar.seek_slider.sliderPressed.emit()
+        self.bar.seek_slider.setValue(30000)
+
+        self.bar.set_position(5.0)
+
+        self.assertEqual(self.bar.seek_slider.value(), 30000)
+
+    def test_keyboard_slider_changes_seek(self):
+        """Page/arrow keys never emit sliderPressed, so they seek directly."""
+        self.bar.set_track("song.flac", 100.0)
+        self.bar.seek_slider.setValue(12000)
+        self.assertEqual(self.seeks, [12.0])
+
+    def test_play_button_reports_intent(self):
+        self.bar.play_button.click()
+        self.assertEqual(len(self.play_pauses), 1)
+
+    def test_close_button_reports_intent(self):
+        self.bar.close_button.click()
+        self.assertEqual(len(self.closes), 1)
+
+    def test_play_button_reflects_playback_state(self):
+        self.bar.set_playing(True)
+        self.assertEqual(self.bar.play_button.accessibleName(), "Pause")
+        self.bar.set_playing(False)
+        self.assertEqual(self.bar.play_button.accessibleName(), "Play")
+
+
+@unittest.skipUnless(PYQT_AVAILABLE, "PyQt6 is not installed")
+class TestMainWindowPlayback(unittest.TestCase):
+    """MainWindow's side of file playback."""
+
+    def setUp(self):
+        self.window = MainWindow()
+
+    def shown(self):
+        """
+        Whether the transport would be on screen.
+
+        The window itself is never shown in these tests, and isVisible() is
+        False for every child of a hidden window; isVisibleTo answers the
+        question we actually care about.
+        """
+        return self.window.playback_bar.isVisibleTo(self.window)
+
+    def test_transport_is_hidden_until_a_file_is_opened(self):
+        self.assertFalse(self.shown())
+
+    def test_opening_a_file_shows_the_transport_playing(self):
+        self.window.set_playback_file("song.mp3", 90.0)
+
+        self.assertTrue(self.shown())
+        self.assertEqual(self.window.playback_bar.duration_label.text(), "1:30")
+        self.assertEqual(self.window.playback_bar.play_button.accessibleName(),
+                         "Pause")
+
+    def test_clearing_the_file_hides_the_transport(self):
+        self.window.set_playback_file("song.mp3", 90.0)
+        self.window.clear_playback_file()
+        self.assertFalse(self.shown())
+
+    def test_open_button_prompts_for_a_file_and_reports_the_choice(self):
+        opened = []
+        self.window.on_file_opened_callback = opened.append
+
+        with mock.patch("visualizer_ui.QFileDialog.getOpenFileName",
+                        return_value=("/music/song.flac", "")):
+            self.window.open_audio_file()
+
+        self.assertEqual(opened, ["/music/song.flac"])
+        # The next dialog reopens where the last one left off.
+        self.assertEqual(self.window._last_open_dir, "/music")
+
+    def test_cancelling_the_dialog_opens_nothing(self):
+        opened = []
+        self.window.on_file_opened_callback = opened.append
+
+        with mock.patch("visualizer_ui.QFileDialog.getOpenFileName",
+                        return_value=("", "")):
+            self.window.open_audio_file()
+
+        self.assertEqual(opened, [])
+
+    def test_transport_interactions_reach_the_application(self):
+        events = []
+        self.window.on_play_pause_callback = lambda: events.append("play_pause")
+        self.window.on_seek_callback = lambda s: events.append(("seek", s))
+        self.window.on_close_file_callback = lambda: events.append("close")
+
+        self.window.playback_bar.play_button.click()
+        self.window.playback_bar.set_track("song.mp3", 100.0)
+        self.window.playback_bar.seek_slider.sliderPressed.emit()
+        self.window.playback_bar.seek_slider.setValue(25000)
+        self.window.playback_bar.seek_slider.sliderReleased.emit()
+        self.window.playback_bar.close_button.click()
+
+        self.assertEqual(events, ["play_pause", ("seek", 25.0), "close"])
+
+    def test_transport_callbacks_are_optional(self):
+        """An unwired window must not raise when its transport is used."""
+        self.window.playback_bar.play_button.click()
+        self.window.playback_bar.close_button.click()
+        with mock.patch("visualizer_ui.QFileDialog.getOpenFileName",
+                        return_value=("/music/song.flac", "")):
+            self.window.open_audio_file()
+
+    def test_space_only_takes_over_while_a_file_is_open(self):
+        """
+        A window-scoped Space shortcut would otherwise steal the key from
+        whichever control has focus.
+        """
+        self.assertFalse(self.window.play_pause_shortcut.isEnabled())
+
+        self.window.set_playback_file("song.mp3", 90.0)
+        self.assertTrue(self.window.play_pause_shortcut.isEnabled())
+
+        self.window.clear_playback_file()
+        self.assertFalse(self.window.play_pause_shortcut.isEnabled())
+
+    def test_open_file_button_lives_in_the_title_bar(self):
+        """The controls row is already tight at the minimum window width."""
+        opened = []
+        self.window.on_file_opened_callback = opened.append
+
+        with mock.patch("visualizer_ui.QFileDialog.getOpenFileName",
+                        return_value=("/music/song.flac", "")):
+            self.window.title_bar.open_file_button.click()
+
+        self.assertEqual(opened, ["/music/song.flac"])
 
 
 if __name__ == '__main__':

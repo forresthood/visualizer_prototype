@@ -1,11 +1,16 @@
+import os
+
 import numpy as np
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QSlider,
-                             QStackedWidget, QPushButton)
+                             QStackedWidget, QPushButton, QFileDialog)
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QLinearGradient,
                          QPainterPath, QRadialGradient, QConicalGradient,
-                         QMouseEvent, QFont, QImage)
+                         QMouseEvent, QFont, QImage, QFontMetrics, QKeySequence,
+                         QShortcut)
+
+from audio_file import file_dialog_filter
 
 class Theme:
     VIZ_BG = QColor(13, 13, 22)
@@ -34,6 +39,76 @@ class Theme:
 
 # Default visualizer color, matching DEFAULT_COLOR_NAME in MainWindow.
 DEFAULT_COLOR = QColor(0, 200, 255)
+
+# Shared by every horizontal slider in the controls (bar count, seek), so they
+# read as one control set instead of drifting apart.
+SLIDER_STYLE = """
+    QSlider::groove:horizontal {
+        background: rgba(255,255,255,0.08);
+        height: 4px;
+        border-radius: 2px;
+    }
+    QSlider::handle:horizontal {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 #7a9aff, stop:1 #5882ff);
+        width: 14px;
+        height: 14px;
+        margin: -5px 0;
+        border-radius: 7px;
+        border: 1px solid rgba(255,255,255,0.15);
+    }
+    QSlider::handle:horizontal:hover {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 #8eabff, stop:1 #6d95ff);
+    }
+    QSlider::sub-page:horizontal {
+        background: rgba(88,130,255,0.35);
+        border-radius: 2px;
+    }
+"""
+
+# Small pill-shaped button used for the transport controls and the file picker.
+TOOL_BUTTON_STYLE = """
+    QPushButton {
+        border: none;
+        border-radius: %(radius)dpx;
+        background: rgba(255,255,255,0.06);
+        color: rgba(240,240,245,0.85);
+        font-size: %(font_size)dpx;
+        padding: 0px 10px;
+    }
+    QPushButton:hover {
+        background: rgba(255,255,255,0.14);
+        color: rgba(240,240,245,1.0);
+    }
+    QPushButton:pressed {
+        background: rgba(255,255,255,0.20);
+    }
+"""
+
+
+def tool_button(text, tooltip, accessible_name, size):
+    """A compact pill button matching the controls panel styling."""
+    button = QPushButton(text)
+    button.setFixedSize(*size)
+    button.setStyleSheet(TOOL_BUTTON_STYLE % {"radius": Theme.RADIUS_SM,
+                                              "font_size": Theme.FONT_SIZE_SMALL})
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setToolTip(tooltip)
+    button.setAccessibleName(accessible_name)
+    return button
+
+
+def format_duration(seconds):
+    """Format a number of seconds as m:ss, or h:mm:ss past the hour mark."""
+    if seconds is None or not np.isfinite(seconds) or seconds < 0:
+        seconds = 0
+    total = int(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
 
 # Rainbow animation tick, ~60 FPS. Only runs while rainbow mode is on and the
 # owning widget is visible (see ColorMixin._sync_rainbow_timer).
@@ -662,6 +737,245 @@ class GlassPanel(QWidget):
 
 
 # ─────────────────────────────────────────────
+#  File playback transport
+# ─────────────────────────────────────────────
+class PlayPauseButton(QPushButton):
+    """
+    Play/pause button that paints its own glyph.
+
+    The obvious characters for this (U+25B6 / U+23F8) are missing from plenty
+    of UI fonts and fall back to a replacement box, so the triangle and the two
+    bars are drawn instead of typed.
+    """
+
+    SIZE = (34, 28)
+    GLYPH_HEIGHT = 12
+    BAR_WIDTH = 3.0
+    BAR_GAP = 3.5
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(*self.SIZE)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # None until the first set_playing, so that call is never mistaken for
+        # a redundant one and always writes the tooltip and accessible name.
+        self._is_playing = None
+        self.set_playing(False)
+        self.setStyleSheet(TOOL_BUTTON_STYLE % {"radius": Theme.RADIUS_SM,
+                                                "font_size": Theme.FONT_SIZE_SMALL})
+
+    def set_playing(self, is_playing):
+        """Show a pause glyph while playing, a play glyph while stopped."""
+        is_playing = bool(is_playing)
+        # The render loop reasserts the transport state ~60 times a second, so
+        # only a real change is allowed to schedule a repaint.
+        if is_playing == self._is_playing:
+            return
+        self._is_playing = is_playing
+        action = "Pause" if self._is_playing else "Play"
+        self.setToolTip(f"{action} (Space)")
+        self.setAccessibleName(action)
+        self.update()
+
+    def paintEvent(self, event):
+        # Let the stylesheet paint the pill, then draw the glyph over it.
+        super().paintEvent(event)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(Theme.TEXT_PRIMARY))
+
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        half = self.GLYPH_HEIGHT / 2.0
+
+        if self._is_playing:
+            top, height = cy - half, self.GLYPH_HEIGHT
+            left = cx - self.BAR_GAP / 2.0 - self.BAR_WIDTH
+            painter.drawRoundedRect(QRectF(left, top, self.BAR_WIDTH, height), 1, 1)
+            painter.drawRoundedRect(
+                QRectF(cx + self.BAR_GAP / 2.0, top, self.BAR_WIDTH, height), 1, 1)
+        else:
+            # Equilateral-ish triangle, nudged right so it reads as centred.
+            width = self.GLYPH_HEIGHT * 0.9
+            left = cx - width / 2.0 + 1.0
+            triangle = QPainterPath()
+            triangle.moveTo(left, cy - half)
+            triangle.lineTo(left + width, cy)
+            triangle.lineTo(left, cy + half)
+            triangle.closeSubpath()
+            painter.drawPath(triangle)
+
+
+class PlaybackBar(GlassPanel):
+    """
+    Transport for a locally opened audio file: play/pause, a seek slider, the
+    elapsed/total time and a button to hand the visualizer back to system audio.
+
+    Hidden until a file is loaded. Like MainWindow, it reports user intent
+    through plain callback attributes rather than driving playback itself.
+    """
+
+    HEIGHT = 46
+    TRACK_LABEL_WIDTH = 200
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(self.HEIGHT)
+        self.setVisible(False)
+
+        # Assigned by the owner to observe transport interactions.
+        self.on_play_pause = None
+        self.on_seek = None
+        self.on_close = None
+
+        # Set while the seek slider is being written from playback position, so
+        # that echo is not mistaken for the user scrubbing.
+        self._syncing = False
+        self._scrubbing = False
+        self._duration = 0.0
+        self._track_name = ""
+        self._shown_position_text = None
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 8, 14, 8)
+        layout.setSpacing(10)
+
+        self.play_button = PlayPauseButton()
+        self.play_button.clicked.connect(self._emit_play_pause)
+        layout.addWidget(self.play_button)
+
+        self.track_label = QLabel("")
+        self.track_label.setFont(Theme.font(Theme.FONT_SIZE_SMALL, QFont.Weight.Medium))
+        self.track_label.setFixedWidth(self.TRACK_LABEL_WIDTH)
+        self.track_label.setStyleSheet(
+            "color: rgba(240,240,245,0.9); background: transparent;")
+        layout.addWidget(self.track_label)
+
+        self.position_label = self._time_label("0:00")
+        layout.addWidget(self.position_label)
+
+        self.seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self.seek_slider.setRange(0, 0)
+        self.seek_slider.setStyleSheet(SLIDER_STYLE)
+        self.seek_slider.setToolTip("Seek within the file")
+        self.seek_slider.setAccessibleName("Playback position")
+        self.seek_slider.sliderPressed.connect(self._on_slider_pressed)
+        self.seek_slider.sliderReleased.connect(self._on_slider_released)
+        self.seek_slider.sliderMoved.connect(self._on_slider_moved)
+        self.seek_slider.valueChanged.connect(self._on_slider_value_changed)
+        layout.addWidget(self.seek_slider, stretch=1)
+
+        self.duration_label = self._time_label("0:00")
+        layout.addWidget(self.duration_label)
+
+        self.close_button = tool_button("✕", "Close the file and return to "
+                                        "system audio", "Close file",
+                                        size=(28, 28))
+        self.close_button.clicked.connect(self._emit_close)
+        layout.addWidget(self.close_button)
+
+    @staticmethod
+    def _time_label(text):
+        label = QLabel(text)
+        label.setFont(Theme.font(Theme.FONT_SIZE_SMALL))
+        label.setStyleSheet("color: rgba(160,160,175,0.9); background: transparent;")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setMinimumWidth(38)
+        return label
+
+    # ── State from the application ──
+
+    def set_track(self, name, duration):
+        """Show the bar for `name`, a file `duration` seconds long."""
+        self._track_name = name
+        self._duration = max(0.0, duration)
+        self._elide_track_name()
+        self.track_label.setToolTip(name)
+        self.duration_label.setText(format_duration(self._duration))
+
+        self._syncing = True
+        # Milliseconds keep the slider smooth on short files without needing a
+        # separate scale factor for long ones.
+        self.seek_slider.setRange(0, max(1, int(self._duration * 1000)))
+        self.seek_slider.setValue(0)
+        self._syncing = False
+
+        self._shown_position_text = None
+        self.set_position(0.0)
+        self.setVisible(True)
+
+    def clear_track(self):
+        """Hide the bar; no file is loaded."""
+        self.setVisible(False)
+        self._scrubbing = False
+        self._duration = 0.0
+        self._track_name = ""
+        self.track_label.setText("")
+        self.track_label.setToolTip("")
+
+    def set_position(self, seconds):
+        """Move the slider to the current playback position."""
+        if self._scrubbing:
+            return
+        self._syncing = True
+        self.seek_slider.setValue(int(max(0.0, seconds) * 1000))
+        self._syncing = False
+        self._show_position(seconds)
+
+    def set_playing(self, is_playing):
+        """Swap the button between play and pause affordances."""
+        self.play_button.set_playing(is_playing)
+
+    # ── Internals ──
+
+    def _elide_track_name(self):
+        metrics = QFontMetrics(self.track_label.font())
+        self.track_label.setText(metrics.elidedText(
+            self._track_name, Qt.TextElideMode.ElideMiddle,
+            self.track_label.width() or self.TRACK_LABEL_WIDTH))
+
+    def _show_position(self, seconds):
+        # The timer ticks at ~60 FPS but the text only changes once a second;
+        # skipping the no-op writes keeps a relayout off the render path.
+        text = format_duration(seconds)
+        if text != self._shown_position_text:
+            self._shown_position_text = text
+            self.position_label.setText(text)
+
+    def _emit_play_pause(self):
+        if self.on_play_pause is not None:
+            self.on_play_pause()
+
+    def _emit_close(self):
+        if self.on_close is not None:
+            self.on_close()
+
+    def _emit_seek(self, milliseconds):
+        if self.on_seek is not None:
+            self.on_seek(milliseconds / 1000.0)
+
+    def _on_slider_pressed(self):
+        self._scrubbing = True
+
+    def _on_slider_moved(self, value):
+        # Preview the target time while dragging; the seek lands on release.
+        self._show_position(value / 1000.0)
+
+    def _on_slider_released(self):
+        self._scrubbing = False
+        self._emit_seek(self.seek_slider.value())
+
+    def _on_slider_value_changed(self, value):
+        # Keyboard and page-step changes never go through press/release, so
+        # they are seeked here; drags and app-driven updates are excluded.
+        if self._syncing or self._scrubbing:
+            return
+        self._show_position(value / 1000.0)
+        self._emit_seek(value)
+
+
+# ─────────────────────────────────────────────
 #  Custom title bar
 # ─────────────────────────────────────────────
 class TitleBar(QWidget):
@@ -682,6 +996,16 @@ class TitleBar(QWidget):
         layout.addWidget(title_label)
 
         layout.addStretch()
+
+        # Opening a file lives here rather than in the controls panel: that row
+        # is already tight at the window's minimum width, and this one is not.
+        self.open_file_button = tool_button(
+            "Open &File", "Open a local audio file to play and visualize "
+            "(Ctrl+O)", "Open file", size=(78, 26))
+        self.open_file_button.clicked.connect(self.parent_window.open_audio_file)
+        layout.addWidget(self.open_file_button)
+
+        layout.addSpacing(10)
 
         # Window buttons
         btn_style_base = """
@@ -794,8 +1118,17 @@ class MainWindow(QMainWindow):
         # Assigned by the application to observe control changes.
         self.on_bars_changed_callback = None
         self.on_mode_changed_callback = None
+        self.on_file_opened_callback = None
+        self.on_play_pause_callback = None
+        self.on_seek_callback = None
+        self.on_close_file_callback = None
+
+        # Directory the file dialog reopens in, so picking a second track from
+        # the same album is not a fresh walk from the home directory.
+        self._last_open_dir = ""
 
         self._build_ui()
+        self._build_shortcuts()
 
     def _build_ui(self):
         # Root widget with rounded dark background
@@ -832,6 +1165,13 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.waveform_widget)     # index 1
         self.stack.addWidget(self.spectrogram_widget)  # index 2
         content_layout.addWidget(self.stack, stretch=1)
+
+        # ── File playback transport (hidden until a file is opened) ──
+        self.playback_bar = PlaybackBar()
+        self.playback_bar.on_play_pause = self._on_play_pause_clicked
+        self.playback_bar.on_seek = self._on_seek_requested
+        self.playback_bar.on_close = self._on_close_file_clicked
+        content_layout.addWidget(self.playback_bar)
 
         # ── Controls panel (glass) ──
         glass = GlassPanel()
@@ -914,30 +1254,7 @@ class MainWindow(QMainWindow):
         self.bar_slider.setToolTip("Adjust the number of frequency bars (Alt+C)")
         self.bar_slider.setAccessibleName("Bar count")
         bars_label.setBuddy(self.bar_slider)
-        self.bar_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                background: rgba(255,255,255,0.08);
-                height: 4px;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #7a9aff, stop:1 #5882ff);
-                width: 14px;
-                height: 14px;
-                margin: -5px 0;
-                border-radius: 7px;
-                border: 1px solid rgba(255,255,255,0.15);
-            }
-            QSlider::handle:horizontal:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #8eabff, stop:1 #6d95ff);
-            }
-            QSlider::sub-page:horizontal {
-                background: rgba(88,130,255,0.35);
-                border-radius: 2px;
-            }
-        """)
+        self.bar_slider.setStyleSheet(SLIDER_STYLE)
         self.bar_slider.valueChanged.connect(self._on_bars_changed)
         bar_count_layout.addWidget(self.bar_slider)
 
@@ -987,6 +1304,59 @@ class MainWindow(QMainWindow):
 
         color_layout.addLayout(swatch_layout)
         return color_layout
+
+    def _build_shortcuts(self):
+        open_shortcut = QShortcut(QKeySequence.StandardKey.Open, self)
+        open_shortcut.activated.connect(self.open_audio_file)
+
+        # Space is the conventional play/pause key, but a window-scoped
+        # shortcut takes it from whichever button has focus. It is therefore
+        # only live while a file is open; the rest of the time Space keeps
+        # activating the focused control as usual.
+        self.play_pause_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        self.play_pause_shortcut.activated.connect(self._on_play_pause_clicked)
+        self.play_pause_shortcut.setEnabled(False)
+
+    # ── File playback ──
+
+    def open_audio_file(self):
+        """Ask for an audio file and hand the choice to the application."""
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self, "Open Audio File", self._last_open_dir, file_dialog_filter())
+        if not path:
+            return
+        self._last_open_dir = os.path.dirname(path)
+        if self.on_file_opened_callback is not None:
+            self.on_file_opened_callback(path)
+
+    def set_playback_file(self, name, duration):
+        """Show the transport for a newly loaded file."""
+        self.playback_bar.set_track(name, duration)
+        self.playback_bar.set_playing(True)
+        self.play_pause_shortcut.setEnabled(True)
+
+    def clear_playback_file(self):
+        """Hide the transport; the visualizer is back on system audio."""
+        self.playback_bar.clear_track()
+        self.play_pause_shortcut.setEnabled(False)
+
+    def set_playback_position(self, seconds):
+        self.playback_bar.set_position(seconds)
+
+    def set_playback_state(self, is_playing):
+        self.playback_bar.set_playing(is_playing)
+
+    def _on_play_pause_clicked(self):
+        if self.on_play_pause_callback is not None:
+            self.on_play_pause_callback()
+
+    def _on_seek_requested(self, seconds):
+        if self.on_seek_callback is not None:
+            self.on_seek_callback(seconds)
+
+    def _on_close_file_clicked(self):
+        if self.on_close_file_callback is not None:
+            self.on_close_file_callback()
 
     def _build_status_label(self):
         self.status_label = QLabel("")
